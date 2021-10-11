@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<launch>
+    <node pkg="habitat_sim_ros" type="habitat_sim_node.py" name="habitat_sim" output="screen">
+        <rosparam command="load" file="$(find habitat_sim_ros)/param/test.yaml" />
+    </node>
+    <node pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find habitat_sim_ros)/param/test.rviz" />
+    <node pkg="rqt_robot_steering" type="rqt_robot_steering" name="robot_steering" />
+</launch>

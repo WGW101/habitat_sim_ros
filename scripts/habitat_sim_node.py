@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+#-*-coding: utf8-*-
 import rospy
 from cv_bridge import CvBridge
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
@@ -9,16 +11,17 @@ import quaternion
 import habitat_sim
 
 
-# TODO: use simtime (/clock topic?)
 
 
 class HabitatSimNode:
     def __init__(self):
         rospy.init_node("habitat_sim")
+        # TODO: use simtime (/clock topic?)
         self._rate = rospy.Rate(rospy.get_param("~sim/rate"))
         self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
         self._last_cmd_vel = rospy.Time.now()
-        self._cmd_timeout = rospy.Duration(rospy.get_param("~cmd/timeout"))
+        self._cmd_timeout = rospy.Duration(rospy.get_param("~agent/cmd_timeout"))
+        self._has_cmd = False
         self._tf_brdcast = TransformBroadcaster()
         self._scan_pub = rospy.Publisher("~scan", LaserScan, queue_size=1)
         self._rgb_pub = rospy.Publisher("~camera/rgb/image_raw", Image, queue_size=1)
@@ -27,19 +30,21 @@ class HabitatSimNode:
 
         self._sensor_specs = []
         self._static_tfs = []
+        rospy.loginfo("Setting up scan sensor")
         self._init_scan()
-        self._init_rgb()
-        self._init_depth()
+        rospy.loginfo("Setting up rgbd sensor")
+        self._init_rgbd()
+        rospy.loginfo("Starting simulator")
         self._init_sim()
 
     def loop(self):
         self._broadcast_static_tf()
-        while not ropsy.is_shutdown():
+        while not rospy.is_shutdown():
             self._broadcast_tf()
             self._publish_scan()
             self._publish_rgbd()
             self._step_sim()
-            self.rate.sleep()
+            self._rate.sleep()
 
     def _init_scan(self):
         x = rospy.get_param("~scan/position/x")
@@ -53,7 +58,7 @@ class HabitatSimNode:
         self._scan_msg.header.frame_id = "scan"
         self._scan_msg.angle_min = -np.pi
         self._scan_msg.angle_max = np.pi
-        self._scan_msg.angle_increment = 2 * np.pi / num_rays
+        self._scan_msg.angle_increment = 2 * np.pi / n_rays
         self._scan_msg.time_increment = 0.0
         self._scan_msg.range_min = r_min
         self._scan_msg.range_max = r_max
@@ -65,7 +70,7 @@ class HabitatSimNode:
         tf.transform.translation.x = x
         tf.transform.translation.x = y
         tf.transform.translation.x = z
-        tf.orientation.w = 1
+        tf.transform.rotation.w = 1
         self._static_tfs.append(tf)
 
         n_rays_per_scan = n_rays // 4
@@ -78,12 +83,13 @@ class HabitatSimNode:
             spec.orientation = [0.0, pan, 0.0]
             spec.resolution = [1, n_rays_per_scan]
             spec.parameters["hfov"] = "90"
-            spec.parameters["near"] = str(r_min)
-            spec.parameters["far"] = str(r_max)
             self._sensor_specs.append(spec)
+        d_to_rho = np.sqrt(np.linspace(-0.5, 0.5, n_rays_per_scan)**2 + 1)
+        self._scan_d_to_rho = np.tile(d_to_rho, (4,))
 
     def _init_rgbd(self):
-        for sensor, sensor_type in (("rgb", "COLOR"), ("depth", "DEPTH")):
+        for sensor, sensor_type in (("rgb", habitat_sim.sensor.SensorType.COLOR),
+                                    ("depth", habitat_sim.sensor.SensorType.DEPTH)):
             x = rospy.get_param(f"~{sensor}/position/x")
             y = rospy.get_param(f"~{sensor}/position/y")
             z = rospy.get_param(f"~{sensor}/position/z")
@@ -93,7 +99,7 @@ class HabitatSimNode:
             hfov = rospy.get_param(f"~{sensor}/hfov")
             f = 0.5 * w / np.tan(0.5 * hfov)
 
-            info_pub = rospy.Publisher("~camera/rgb/camera_info", CameraInfo,
+            info_pub = rospy.Publisher(f"~camera/{sensor}/camera_info", CameraInfo,
                                        queue_size=1, latch=True)
             cam_info = CameraInfo()
             cam_info.header.stamp = rospy.Time.now()
@@ -120,13 +126,13 @@ class HabitatSimNode:
             tf.transform.translation.x = x
             tf.transform.translation.x = y
             tf.transform.translation.x = z
-            tf.orientation.y = np.sin(0.5 * tilt)
-            tf.orientation.w = np.cos(0.5 * tilt)
+            tf.transform.rotation.y = np.sin(0.5 * tilt)
+            tf.transform.rotation.w = np.cos(0.5 * tilt)
             self._static_tfs.append(tf)
 
             spec = habitat_sim.sensor.SensorSpec()
             spec.uuid = sensor
-            spec.sensor_type = habitat_sim.sensor.SensorType[sensor_type]
+            spec.sensor_type = sensor_type
             spec.position = [-y, z, -x]
             spec.orientation = [-tilt, 0, 0]
             spec.resolution = [h, w]
@@ -141,7 +147,7 @@ class HabitatSimNode:
         agent_cfg = habitat_sim.agent.AgentConfiguration()
         agent_cfg.height = rospy.get_param("~agent/height")
         agent_cfg.radius = rospy.get_param("~agent/radius")
-        agent_cfg.sensor_specifications = self.sensor_specs
+        agent_cfg.sensor_specifications = self._sensor_specs
 
         cfg = habitat_sim.simulator.Configuration(sim_cfg, [agent_cfg])
         self._sim = habitat_sim.simulator.Simulator(cfg)
@@ -175,6 +181,7 @@ class HabitatSimNode:
         self._vel_ctrl.linear_velocity.z = -msg.linear.x
         self._vel_ctrl.angular_velocity.y = msg.angular.z
         self._last_cmd_vel = rospy.Time.now()
+        self._has_cmd = True
 
     def _broadcast_static_tf(self):
         static_tf_brdcast = StaticTransformBroadcaster()
@@ -204,28 +211,32 @@ class HabitatSimNode:
 
     def _publish_scan(self):
         self._scan_msg.header.stamp = rospy.Time.now()
-        self._scan_msg.ranges = (self._last_obs["br_scan"][0, ::-1].flatten().tolist()
-                                 + self._last_obs["fr_scan"][0, ::-1].flatten().tolist()
-                                 + self._last_obs["fl_scan"][0, ::-1].flatten().tolist()
-                                 + self._last_obs["bl_scan"][0, ::-1].flatten().tolist())
+        scan_d = np.concatenate((self._last_obs["bl_scan"],
+                                 self._last_obs["fl_scan"],
+                                 self._last_obs["fr_scan"],
+                                 self._last_obs["br_scan"]), 1)
+        self._scan_msg.ranges = (scan_d[0, ::-1] * self._scan_d_to_rho).tolist()
         self._scan_pub.publish(self._scan_msg)
 
     def _publish_rgbd(self):
         rgb = self._last_obs["rgb"][:, :, :3]
-        rgb_msg = self._bridge.cv2_to_imgmsg(rgb, encoding="rgb8")
+        rgb_msg = self._cv_bridge.cv2_to_imgmsg(rgb, encoding="rgb8")
         self._rgb_pub.publish(rgb_msg)
 
         depth = (self._last_obs["depth"] * 1000).astype(np.uint16)
-        depth_msg = self._bridge.cv2_to_imgmsg(d, encoding="mono16")
+        depth_msg = self._cv_bridge.cv2_to_imgmsg(depth, encoding="mono16")
         self._depth_pub.publish(depth_msg)
 
     def _step_sim(self):
+        if not self._has_cmd:
+            return
+
         now = rospy.Time.now()
         if now - self._last_cmd_vel > self._cmd_timeout:
             rospy.logwarn("Last velocity command timed out, cancelling it.")
             self._vel_ctrl.linear_velocity.z = 0
             self._vel_ctrl.angular_velocity.y = 0
-            self._last_cmd_vel = now
+            self._has_cmd = False
 
         s = self._sim.get_rigid_state(self._agent_obj_id)
         dt = self._rate.sleep_dur.to_sec()

@@ -1,0 +1,41 @@
+sim:
+    rate: 60.0
+    allow_sliding: false
+    scene_id: "/home/wgw/habitat_data/scene_datasets/mp3d/17DRP5sb8fy/17DRP5sb8fy.glb"
+agent:
+    cmd_timeout: 1.0
+    height: 0.65
+    radius: 0.22
+    start_position:
+        random: true
+    start_orientation:
+        random: true
+scan:
+    position:
+        x: 0.0
+        y: 0.0
+        z: 0.45
+    range:
+        min: 0.0
+        max: 10.0
+    num_rays: 360
+rgb:
+    position:
+        x: 0.047
+        y: 0.015
+        z: 0.589
+    orientation:
+        tilt: 0.0
+    width: 320
+    height: 240
+    hfov: 56
+depth:
+    position:
+        x: 0.047
+        y: 0.015
+        z: 0.589
+    orientation:
+        tilt: 0.0
+    width: 320
+    height: 240
+    hfov: 56
