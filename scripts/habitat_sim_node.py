@@ -108,8 +108,8 @@ class HabitatSimNode:
             spec.resolution = [1, n_rays_per_scan]
             spec.parameters["hfov"] = "90"
             self._sensor_specs.append(spec)
-        d_to_rho = np.sqrt(np.linspace(-0.5, 0.5, n_rays_per_scan)**2 + 1)
-        self._scan_d_to_rho = np.tile(d_to_rho, (4,))
+        d_to_rho = np.sqrt(np.linspace(-1, 1, n_rays_per_scan)**2 + 1)
+        self._scan_d_to_rho = np.tile(d_to_rho, (4,))[::-1]
 
     def _init_rgbd(self):
         q = np.quaternion(0.5, -0.5, 0.5, -0.5)
@@ -172,6 +172,7 @@ class HabitatSimNode:
         sim_cfg = habitat_sim.sim.SimulatorConfiguration()
         sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding")
         sim_cfg.scene_id = rospy.get_param("~sim/scene_path")
+        sim_cfg.random_seed = rospy.get_param("~sim/seed")
 
         agent_cfg = habitat_sim.agent.AgentConfiguration()
         agent_cfg.height = rospy.get_param("~agent/height")

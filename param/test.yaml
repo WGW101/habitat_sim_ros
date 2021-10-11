@@ -1,7 +1,8 @@
 sim:
     rate: 60.0
     allow_sliding: true
-    scene_path: "/home/wgw/habitat_data/scene_datasets/citi/4d6ab9cc04f24c87aed802698f957b7a.glb"
+    scene_path: "/home/wgw/habitat_data/scene_datasets/mp3d/E9uDoFAP3SH/E9uDoFAP3SH.glb"
+    seed: 123456
 agent:
     cmd_timeout: 1.0
     height: 0.65
@@ -9,8 +10,7 @@ agent:
     start_position:
         random: true
     start_orientation:
-        random: false
-        yaw: 90
+        random: true
 scan:
     position:
         x: 0.0
