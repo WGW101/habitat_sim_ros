@@ -3,20 +3,35 @@
 import rospy
 from cv_bridge import CvBridge
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
-from sensor_msgs.msg import LaserScan, Image, CameraInfo
+
+from rosgraph_msgs.msg import Clock
 from geometry_msgs.msg import Twist, TransformStamped
+from sensor_msgs.msg import LaserScan, Image, CameraInfo
+from std_srvs.srv import Empty, EmptyResponse
 
 import numpy as np
 import quaternion
 import habitat_sim
 
 
-
-
 class HabitatSimNode:
     def __init__(self):
         rospy.init_node("habitat_sim")
-        # TODO: use simtime (/clock topic?)
+
+        self._sensor_specs = []
+        self._static_tfs = []
+        rospy.loginfo("Setting up scan sensor")
+        self._init_scan()
+        rospy.loginfo("Setting up rgbd sensor")
+        self._init_rgbd()
+        rospy.loginfo("Starting simulator")
+        self._init_sim()
+
+        rospy.loginfo("Setting up topics and services")
+        self._use_sim_time = rospy.get_param("/use_sim_time", False)
+        if self._use_sim_time:
+            self._clock_msg = Clock()
+            self._clock_pub = rospy.Publisher("/clock", Clock, queue_size=1)
         self._rate = rospy.Rate(rospy.get_param("~sim/rate"))
         self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
         self._last_cmd_vel = rospy.Time.now()
@@ -28,23 +43,32 @@ class HabitatSimNode:
         self._depth_pub = rospy.Publisher("~camera/depth/image_raw", Image, queue_size=1)
         self._cv_bridge = CvBridge()
 
-        self._sensor_specs = []
-        self._static_tfs = []
-        rospy.loginfo("Setting up scan sensor")
-        self._init_scan()
-        rospy.loginfo("Setting up rgbd sensor")
-        self._init_rgbd()
-        rospy.loginfo("Starting simulator")
-        self._init_sim()
+        rospy.Service("~reset", Empty, self.reset)
+        self._needs_reset = False
+
+
+    def reset(self, req):
+        self._needs_reset = True
+        if self._use_sim_time:
+            self._clock_msg = Clock()
+        return EmptyResponse()
+
 
     def loop(self):
         self._broadcast_static_tf()
         while not rospy.is_shutdown():
+            if self._needs_reset:
+                self._last_obs = self._sim.reset()
+                self._needs_reset = False
             self._broadcast_tf()
             self._publish_scan()
             self._publish_rgbd()
             self._step_sim()
-            self._rate.sleep()
+            if self._use_sim_time:
+                self._clock_msg.clock += self._rate.sleep_dur
+                self._clock_pub.publish(self._clock_msg)
+            else:
+                self._rate.sleep()
 
     def _init_scan(self):
         x = rospy.get_param("~scan/position/x")
@@ -68,8 +92,8 @@ class HabitatSimNode:
         tf.header.frame_id = "base_footprint"
         tf.child_frame_id = "scan"
         tf.transform.translation.x = x
-        tf.transform.translation.x = y
-        tf.transform.translation.x = z
+        tf.transform.translation.y = y
+        tf.transform.translation.z = z
         tf.transform.rotation.w = 1
         self._static_tfs.append(tf)
 
@@ -88,6 +112,7 @@ class HabitatSimNode:
         self._scan_d_to_rho = np.tile(d_to_rho, (4,))
 
     def _init_rgbd(self):
+        q = np.quaternion(0.5, -0.5, 0.5, -0.5)
         for sensor, sensor_type in (("rgb", habitat_sim.sensor.SensorType.COLOR),
                                     ("depth", habitat_sim.sensor.SensorType.DEPTH)):
             x = rospy.get_param(f"~{sensor}/position/x")
@@ -107,7 +132,7 @@ class HabitatSimNode:
             cam_info.height = h
             cam_info.width = w
             cam_info.distortion_model = "plumb_bob"
-            cam_info.D = [.0, .0, .0, .0, .0]
+            cam_info.D = [0, 0, 0, 0, 0]
             cam_info.K = [f, 0, 0.5 * w,
                           0, f, 0.5 * h,
                           0, 0,       1]
@@ -124,10 +149,14 @@ class HabitatSimNode:
             tf.header.frame_id = "base_footprint"
             tf.child_frame_id = f"camera/{sensor}/optical_frame"
             tf.transform.translation.x = x
-            tf.transform.translation.x = y
-            tf.transform.translation.x = z
-            tf.transform.rotation.y = np.sin(0.5 * tilt)
-            tf.transform.rotation.w = np.cos(0.5 * tilt)
+            tf.transform.translation.y = y
+            tf.transform.translation.z = z
+            q_tilt = np.quaternion(np.cos(0.5 * tilt), 0, np.sin(0.5*tilt), 0)
+            rot = q_tilt * q
+            tf.transform.rotation.x = rot.x
+            tf.transform.rotation.y = rot.y
+            tf.transform.rotation.z = rot.z
+            tf.transform.rotation.w = rot.w
             self._static_tfs.append(tf)
 
             spec = habitat_sim.sensor.SensorSpec()
@@ -142,7 +171,7 @@ class HabitatSimNode:
     def _init_sim(self):
         sim_cfg = habitat_sim.sim.SimulatorConfiguration()
         sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding")
-        sim_cfg.scene_id = rospy.get_param("~sim/scene_id")
+        sim_cfg.scene_id = rospy.get_param("~sim/scene_path")
 
         agent_cfg = habitat_sim.agent.AgentConfiguration()
         agent_cfg.height = rospy.get_param("~agent/height")

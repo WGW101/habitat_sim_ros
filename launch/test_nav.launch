@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+    <include file="$(find habitat_sim_ros)/launch/test.launch"/>
+    <node pkg="slam_toolbox" type="sync_slam_toolbox_node" name="slam_toolbox" output="screen">
+        <rosparam file="$(find slam_toolbox)/config/mapper_params_online_sync.yaml"/>
+        <remap from="scan" to="/habitat_sim/scan"/>
+    </node>
+    <node pkg="move_base" type="move_base" name="move_base">
+        <param name="global_costmap/robot_base_frame" value="base_footprint"/>
+        <param name="global_costmap/static_map" value="true"/>
+        <param name="global_costmap/update_frequency" value="1.0"/>
+        <param name="global_costmap/robot_radius" value="0.18"/>
+        <param name="global_costmap/inflation_radius" value="0.5"/>
+
+        <param name="local_costmap/robot_base_frame" value="base_footprint"/>
+        <param name="local_costmap/static_map" value="false"/>
+        <param name="local_costmap/rolling_window" value="true"/>
+        <param name="local_costmap/width" value="3.0"/>
+        <param name="local_costmap/height" value="3.0"/>
+
+        <remap from="scan" to="/habitat_sim/scan"/>
+        <remap from="cmd_vel" to="/habitat_sim/cmd_vel"/>
+    </node>
+</launch>

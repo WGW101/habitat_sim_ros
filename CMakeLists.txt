@@ -11,8 +11,10 @@ find_package(catkin REQUIRED COMPONENTS
   cv_bridge
   geometry_msgs
   nav_msgs
+  rosgraph_msgs
   rospy
   sensor_msgs
+  std_srvs
   tf2
   tf2_ros
 )
