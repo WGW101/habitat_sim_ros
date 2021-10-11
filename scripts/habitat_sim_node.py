@@ -18,30 +18,15 @@ class HabitatSimNode:
     def __init__(self):
         rospy.init_node("habitat_sim")
 
+        self._seed = rospy.get_param("~sim/seed", None)
+        self._rng = np.random.default_rng(self._seed)
+
         self._sensor_specs = []
         self._static_tfs = []
-        rospy.loginfo("Setting up scan sensor")
         self._init_scan()
-        rospy.loginfo("Setting up rgbd sensor")
         self._init_rgbd()
-        rospy.loginfo("Starting simulator")
+        self._init_odom()
         self._init_sim()
-
-        rospy.loginfo("Setting up topics and services")
-        self._use_sim_time = rospy.get_param("/use_sim_time", False)
-        if self._use_sim_time:
-            self._clock_msg = Clock()
-            self._clock_pub = rospy.Publisher("/clock", Clock, queue_size=1)
-        self._rate = rospy.Rate(rospy.get_param("~sim/rate"))
-        self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
-        self._last_cmd_vel = rospy.Time.now()
-        self._cmd_timeout = rospy.Duration(rospy.get_param("~agent/cmd_timeout"))
-        self._has_cmd = False
-        self._tf_brdcast = TransformBroadcaster()
-        self._scan_pub = rospy.Publisher("~scan", LaserScan, queue_size=1)
-        self._rgb_pub = rospy.Publisher("~camera/rgb/image_raw", Image, queue_size=1)
-        self._depth_pub = rospy.Publisher("~camera/depth/image_raw", Image, queue_size=1)
-        self._cv_bridge = CvBridge()
 
         rospy.Service("~reset", Empty, self.reset)
         self._needs_reset = False
@@ -71,12 +56,13 @@ class HabitatSimNode:
                 self._rate.sleep()
 
     def _init_scan(self):
-        x = rospy.get_param("~scan/position/x")
-        y = rospy.get_param("~scan/position/y")
-        z = rospy.get_param("~scan/position/z")
-        r_min = rospy.get_param("~scan/range/min")
-        r_max = rospy.get_param("~scan/range/max")
-        n_rays = rospy.get_param("~scan/num_rays")
+        rospy.loginfo("Setting up scan sensor")
+        x = rospy.get_param("~scan/position/x", 0.0)
+        y = rospy.get_param("~scan/position/y", 0.0)
+        z = rospy.get_param("~scan/position/z", 0.45)
+        r_min = rospy.get_param("~scan/range/min", 0.0)
+        r_max = rospy.get_param("~scan/range/max", 10.0)
+        n_rays = rospy.get_param("~scan/num_rays", 360)
 
         self._scan_msg = LaserScan()
         self._scan_msg.header.frame_id = "scan"
@@ -108,20 +94,25 @@ class HabitatSimNode:
             spec.resolution = [1, n_rays_per_scan]
             spec.parameters["hfov"] = "90"
             self._sensor_specs.append(spec)
-        d_to_rho = np.sqrt(np.linspace(-1, 1, n_rays_per_scan)**2 + 1)
-        self._scan_d_to_rho = np.tile(d_to_rho, (4,))[::-1]
+        rectif = np.sqrt(np.linspace(-1, 1, n_rays_per_scan)**2 + 1)
+        self._scan_rect = np.tile(rectif, (4,))[::-1]
+        self._scan_bias = rospy.get_param("~scan/noise/bias", 0.0)
+        self._scan_stdev = rospy.get_param("~scan/noise/stdev", 0.0)
+
+        self._scan_pub = rospy.Publisher("~scan", LaserScan, queue_size=1)
 
     def _init_rgbd(self):
+        rospy.loginfo("Setting up rgbd sensor")
         q = np.quaternion(0.5, -0.5, 0.5, -0.5)
         for sensor, sensor_type in (("rgb", habitat_sim.sensor.SensorType.COLOR),
                                     ("depth", habitat_sim.sensor.SensorType.DEPTH)):
-            x = rospy.get_param(f"~{sensor}/position/x")
-            y = rospy.get_param(f"~{sensor}/position/y")
-            z = rospy.get_param(f"~{sensor}/position/z")
-            tilt = np.radians(rospy.get_param(f"~{sensor}/orientation/tilt"))
-            h = rospy.get_param(f"~{sensor}/height")
-            w = rospy.get_param(f"~{sensor}/width")
-            hfov = rospy.get_param(f"~{sensor}/hfov")
+            x = rospy.get_param(f"~{sensor}/position/x", 0.0)
+            y = rospy.get_param(f"~{sensor}/position/y", 0.0)
+            z = rospy.get_param(f"~{sensor}/position/z", 0.6)
+            tilt = np.radians(rospy.get_param(f"~{sensor}/orientation/tilt", 0.0))
+            h = rospy.get_param(f"~{sensor}/height", 240)
+            w = rospy.get_param(f"~{sensor}/width", 320)
+            hfov = rospy.get_param(f"~{sensor}/hfov", 60)
             f = 0.5 * w / np.tan(0.5 * hfov)
 
             info_pub = rospy.Publisher(f"~camera/{sensor}/camera_info", CameraInfo,
@@ -168,34 +159,36 @@ class HabitatSimNode:
             spec.parameters["hfov"] = str(hfov)
             self._sensor_specs.append(spec)
 
+        self._rgb_pub = rospy.Publisher("~camera/rgb/image_raw", Image, queue_size=1)
+        self._depth_pub = rospy.Publisher("~camera/depth/image_raw", Image, queue_size=1)
+        self._cv_bridge = CvBridge()
+
+    def _init_odom(self):
+        self._odom_lin_bias = rospy.get_param("~odom/linear/noise/bias", 0.0)
+        self._odom_lin_stdev = rospy.get_param("~odom/linear/noise/stdev", 0.0)
+        self._odom_ang_bias = rospy.get_param("~odom/angular/noise/bias", 0.0)
+        self._odom_ang_stdev = rospy.get_param("~odom/angular/noise/stdev", 0.0)
+        self._odom_pos_drift = np.array([0.0, 0.0, 0.0])
+        self._odom_rot_drift = np.quaternion(1.0, 0.0, 0.0, 0.0)
+        self._tf_brdcast = TransformBroadcaster()
+
     def _init_sim(self):
+        rospy.loginfo("Setting up simulator")
+        self._use_sim_time = rospy.get_param("/use_sim_time", False)
+        if self._use_sim_time:
+            self._clock_msg = Clock()
+            self._clock_pub = rospy.Publisher("/clock", Clock, queue_size=1)
+        self._rate = rospy.Rate(rospy.get_param("~sim/rate", 60.0))
+
         sim_cfg = habitat_sim.sim.SimulatorConfiguration()
-        sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding")
-        sim_cfg.scene_id = rospy.get_param("~sim/scene_path")
-        sim_cfg.random_seed = rospy.get_param("~sim/seed")
+        sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding", True)
+        sim_cfg.scene_id = rospy.get_param("~sim/scene_path") # required!
+        sim_cfg.random_seed = self._seed
 
         agent_cfg = habitat_sim.agent.AgentConfiguration()
-        agent_cfg.height = rospy.get_param("~agent/height")
-        agent_cfg.radius = rospy.get_param("~agent/radius")
+        agent_cfg.height = rospy.get_param("~agent/height", 0.8)
+        agent_cfg.radius = rospy.get_param("~agent/radius", 0.2)
         agent_cfg.sensor_specifications = self._sensor_specs
-
-        cfg = habitat_sim.simulator.Configuration(sim_cfg, [agent_cfg])
-        self._sim = habitat_sim.simulator.Simulator(cfg)
-
-        state = habitat_sim.agent.AgentState()
-        if rospy.get_param("~agent/start_position/random"):
-            state.position = self._sim.pathfinder.get_random_navigable_point()
-        else:
-            state.position[0] = -rospy.get_param("~agent/start_position/y")
-            state.position[1] = rospy.get_param("~agent/start_position/z")
-            state.position[2] = -rospy.get_param("~agent/start_position/x")
-        if rospy.get_param("~agent/start_orientation/random"):
-            yaw = 2 * np.pi * np.random.random()
-        else:
-            yaw = np.radians(rospy.get_param("~agent/start_orientation/yaw"))
-        state.rotation = np.quaternion(np.cos(0.5 * yaw), 0, np.sin(0.5 * yaw), 0)
-        self._sim.get_agent(0).set_state(state, is_initial=True)
-        self._last_obs = self._sim.get_sensor_observations()
 
         self._vel_ctrl = habitat_sim.physics.VelocityControl()
         self._vel_ctrl.controlling_lin_vel = True
@@ -203,14 +196,37 @@ class HabitatSimNode:
         self._vel_ctrl.controlling_ang_vel = True
         self._vel_ctrl.ang_vel_is_local = True
 
+        cfg = habitat_sim.simulator.Configuration(sim_cfg, [agent_cfg])
+        self._sim = habitat_sim.simulator.Simulator(cfg)
         mngr = self._sim.get_object_template_manager()
         tmpl_id = mngr.get_template_ID_by_handle(*mngr.get_template_handles('cylinderSolid'))
         self._agent_obj_id = self._sim.add_object(tmpl_id, self._sim.get_agent(0).scene_node)
 
+        state = habitat_sim.agent.AgentState()
+        if rospy.get_param("~agent/start_position/random", True):
+            state.position = self._sim.pathfinder.get_random_navigable_point()
+        else:
+            state.position[0] = -rospy.get_param("~agent/start_position/y", 0.0)
+            state.position[1] = rospy.get_param("~agent/start_position/z", 0.0)
+            state.position[2] = -rospy.get_param("~agent/start_position/x", 0.0)
+        if rospy.get_param("~agent/start_orientation/random", True):
+            yaw = 2 * np.pi * np.random.random()
+        else:
+            yaw = np.radians(rospy.get_param("~agent/start_orientation/yaw", 0.0))
+        state.rotation = np.quaternion(np.cos(0.5 * yaw), 0, np.sin(0.5 * yaw), 0)
+
+        self._sim.get_agent(0).set_state(state, is_initial=True)
+        self._last_obs = self._sim.get_sensor_observations()
+
+        self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
+        self._last_cmd_vel_time = rospy.Time.now()
+        self._cmd_timeout = rospy.Duration(rospy.get_param("~agent/ctrl/timeout", 1.0))
+        self._has_cmd = False
+
     def _on_cmd_vel(self, msg):
         self._vel_ctrl.linear_velocity.z = -msg.linear.x
         self._vel_ctrl.angular_velocity.y = msg.angular.z
-        self._last_cmd_vel = rospy.Time.now()
+        self._last_cmd_vel_time = rospy.Time.now()
         self._has_cmd = True
 
     def _broadcast_static_tf(self):
@@ -220,6 +236,21 @@ class HabitatSimNode:
     def _broadcast_tf(self):
         state = self._sim.get_agent(0).get_state()
         init_state = self._sim.get_agent(0).initial_state
+
+        if self._has_cmd: # Only drift when moving...
+            if self._odom_ang_stdev > 0:
+                drift = self._rng.normal(self._odom_ang_bias, self._odom_ang_stdev)
+                self._odom_rot_drift *= np.quaternion(np.cos(0.5 * drift), 0,
+                                                      np.sin(0.5 * drift), 0)
+                state.rotation *= self._odom_rot_drift
+
+            if self._odom_lin_stdev > 0:
+                drift = self._rng.normal(self._odom_lin_bias, self._odom_lin_stdev)
+                heading = (state.rotation
+                           * np.quaternion(0, 0, 0, -1)
+                           * state.rotation.conj()).vec
+                self._odom_pos_drift += drift * heading
+                state.position += self._odom_pos_drift
 
         rel_pos = (init_state.rotation.conj()
                    * np.quaternion(0, *(state.position - init_state.position))
@@ -245,7 +276,10 @@ class HabitatSimNode:
                                  self._last_obs["fl_scan"],
                                  self._last_obs["fr_scan"],
                                  self._last_obs["br_scan"]), 1)
-        self._scan_msg.ranges = (scan_d[0, ::-1] * self._scan_d_to_rho).tolist()
+        scan_r = scan_d[0, ::-1] * self._scan_rect
+        if self._scan_stdev > 0:
+            scan_r += self._rng.normal(self._scan_bias, self._scan_stdev, scan_r.shape)
+        self._scan_msg.ranges = scan_r.tolist()
         self._scan_pub.publish(self._scan_msg)
 
     def _publish_rgbd(self):
@@ -262,7 +296,7 @@ class HabitatSimNode:
             return
 
         now = rospy.Time.now()
-        if now - self._last_cmd_vel > self._cmd_timeout:
+        if now - self._last_cmd_vel_time > self._cmd_timeout:
             rospy.logwarn("Last velocity command timed out, cancelling it.")
             self._vel_ctrl.linear_velocity.z = 0
             self._vel_ctrl.angular_velocity.y = 0

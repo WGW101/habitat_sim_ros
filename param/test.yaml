@@ -1,16 +1,40 @@
 sim:
     rate: 60.0
     allow_sliding: true
-    scene_path: "/home/wgw/habitat_data/scene_datasets/mp3d/E9uDoFAP3SH/E9uDoFAP3SH.glb"
+    scene_path: "/home/wgw/habitat_data/scene_datasets/mp3d/1LXtFkjw3qL/1LXtFkjw3qL.glb"
     seed: 123456
 agent:
-    cmd_timeout: 1.0
     height: 0.65
     radius: 0.22
     start_position:
         random: true
     start_orientation:
         random: true
+    ctrl:
+        timeout: 1.0
+        linear:
+            min_vel: 0.0
+            max_vel: 1.0
+            max_accel: 0.2
+            noise:
+                bias: 0.0
+                stdev: 0.0
+        angular:
+            min_vel: -1.5
+            max_vel: 1.5
+            max_accel: 0.5
+            noise:
+                bias: 0.0
+                stdev: 0.0
+odom:
+    linear:
+        noise:
+            bias: 0.001
+            stdev: 0.01
+    angular:
+        noise:
+            bias: 0.01
+            stdev: 0.05
 scan:
     position:
         x: 0.0
@@ -20,6 +44,9 @@ scan:
         min: 0.0
         max: 10.0
     num_rays: 360
+    noise:
+        bias: 0.04
+        stdev: 0.03
 rgb:
     position:
         x: 0.047
