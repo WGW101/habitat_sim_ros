@@ -233,47 +233,49 @@ class HabitatSimNode:
         self._has_cmd = False
 
     def _init_map(self):
-        rospy.loginfo("Setting up oracle map")
-        res = rospy.get_param("~map/resolution", 0.02)
+        self._map_enabled = rospy.get_param("~map/enabled", False)
+        if self._map_enabled:
+            rospy.loginfo("Setting up oracle map")
+            res = rospy.get_param("~map/resolution", 0.02)
 
-        self._map_msg = OccupancyGrid()
-        self._map_msg.header.stamp = rospy.Time.now()
-        self._map_msg.header.frame_id = "map"
-        self._map_msg.info.map_load_time = self._map_msg.header.stamp
-        self._map_msg.info.resolution = res
+            self._map_msg = OccupancyGrid()
+            self._map_msg.header.stamp = rospy.Time.now()
+            self._map_msg.header.frame_id = "map"
+            self._map_msg.info.map_load_time = self._map_msg.header.stamp
+            self._map_msg.info.resolution = res
 
-        agent_height = self._sim.get_agent(0).state.position[1]
-        settings = habitat_sim.nav.NavMeshSettings()
-        settings.set_defaults()
-        settings.agent_radius = 0
-        settings.agent_height = 0
-        self._sim.recompute_navmesh(self._sim.pathfinder, settings)
-        sensor_height = self._sensor_specs[0].position[1]
-        navmask = self._sim.pathfinder.get_topdown_view(res, agent_height + sensor_height)
-        settings.agent_radius = self._sim.config.agents[0].radius
-        settings.agent_height = self._sim.config.agents[0].height
-        self._sim.recompute_navmesh(self._sim.pathfinder, settings)
+            agent_height = self._sim.get_agent(0).state.position[1]
+            settings = habitat_sim.nav.NavMeshSettings()
+            settings.set_defaults()
+            settings.agent_radius = 0
+            settings.agent_height = 0
+            self._sim.recompute_navmesh(self._sim.pathfinder, settings)
+            sensor_height = self._sensor_specs[0].position[1]
+            navmask = self._sim.pathfinder.get_topdown_view(res, agent_height + sensor_height)
+            settings.agent_radius = self._sim.config.agents[0].radius
+            settings.agent_height = self._sim.config.agents[0].height
+            self._sim.recompute_navmesh(self._sim.pathfinder, settings)
 
-        edges = np.zeros_like(navmask)
-        edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[:-1, 1:]
-        edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[1:, :-1]
-        edges[:-1, 1:] |= ~navmask[:-1, 1:] & navmask[:-1, :-1]
-        edges[1:, :-1] |= ~navmask[1:, :-1] & navmask[:-1, :-1]
-        lower, upper = self._sim.pathfinder.get_bounds()
+            edges = np.zeros_like(navmask)
+            edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[:-1, 1:]
+            edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[1:, :-1]
+            edges[:-1, 1:] |= ~navmask[:-1, 1:] & navmask[:-1, :-1]
+            edges[1:, :-1] |= ~navmask[1:, :-1] & navmask[:-1, :-1]
+            lower, upper = self._sim.pathfinder.get_bounds()
 
-        self._map_msg.info.width = navmask.shape[0]
-        self._map_msg.info.height = navmask.shape[1]
-        self._map_msg.info.origin.position.x = -upper[2]
-        self._map_msg.info.origin.position.y = -upper[0]
-        self._map_msg.info.origin.position.z = agent_height
-        self._map_msg.info.origin.orientation.w = 1
+            self._map_msg.info.width = navmask.shape[0]
+            self._map_msg.info.height = navmask.shape[1]
+            self._map_msg.info.origin.position.x = -upper[2]
+            self._map_msg.info.origin.position.y = -upper[0]
+            self._map_msg.info.origin.position.z = agent_height
+            self._map_msg.info.origin.orientation.w = 1
 
-        map_data = np.full(navmask.shape, -1, dtype=np.int8)
-        map_data[navmask] = 0
-        map_data[edges] = 100
-        self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
+            map_data = np.full(navmask.shape, -1, dtype=np.int8)
+            map_data[navmask] = 0
+            map_data[edges] = 100
+            self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
 
-        self._map_pub = rospy.Publisher("~map", OccupancyGrid, queue_size=1, latch=True)
+            self._map_pub = rospy.Publisher("~map", OccupancyGrid, queue_size=1, latch=True)
 
     def _on_cmd_vel(self, msg):
         self._vel_ctrl.linear_velocity.z = -msg.linear.x
@@ -286,7 +288,8 @@ class HabitatSimNode:
         static_tf_brdcast.sendTransform(self._static_tfs)
 
     def _publish_static_map(self):
-        self._map_pub.publish(self._map_msg)
+        if self._map_enabled:
+            self._map_pub.publish(self._map_msg)
 
     def _update_odom(self):
         if self._odom_lin_stdev > 0:
@@ -324,21 +327,22 @@ class HabitatSimNode:
         self._tf_brdcast.sendTransform(tf)
 
     def _broadcast_map_tf(self):
-        tf = TransformStamped()
-        tf.header.stamp = rospy.Time.now()
-        tf.header.frame_id = "map"
-        tf.child_frame_id = "odom"
+        if self._map_enabled:
+            tf = TransformStamped()
+            tf.header.stamp = rospy.Time.now()
+            tf.header.frame_id = "map"
+            tf.child_frame_id = "odom"
 
-        pos = self._init_state.position - self._odom_pos_drift
-        rot = self._init_state.rotation * self._odom_rot_drift.conj()
-        tf.transform.translation.x = -pos[2]
-        tf.transform.translation.y = -pos[0]
-        tf.transform.translation.z = pos[1]
-        tf.transform.rotation.x = -rot.z
-        tf.transform.rotation.y = -rot.x
-        tf.transform.rotation.z = rot.y
-        tf.transform.rotation.w = rot.w
-        self._tf_brdcast.sendTransform(tf)
+            pos = self._init_state.position - self._odom_pos_drift
+            rot = self._init_state.rotation * self._odom_rot_drift.conj()
+            tf.transform.translation.x = -pos[2]
+            tf.transform.translation.y = -pos[0]
+            tf.transform.translation.z = pos[1]
+            tf.transform.rotation.x = -rot.z
+            tf.transform.rotation.y = -rot.x
+            tf.transform.rotation.z = rot.y
+            tf.transform.rotation.w = rot.w
+            self._tf_brdcast.sendTransform(tf)
 
     def _publish_scan(self):
         self._scan_msg.header.stamp = rospy.Time.now()
