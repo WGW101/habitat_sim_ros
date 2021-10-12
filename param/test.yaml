@@ -2,7 +2,7 @@ sim:
     rate: 60.0
     allow_sliding: true
     scene_path: "/home/wgw/habitat_data/scene_datasets/mp3d/1LXtFkjw3qL/1LXtFkjw3qL.glb"
-    seed: 123456
+    seed: 1256
 agent:
     height: 0.65
     radius: 0.22
@@ -26,15 +26,17 @@ agent:
             noise:
                 bias: 0.0
                 stdev: 0.0
+map:
+    resolution: 0.02
 odom:
     linear:
         noise:
-            bias: 0.001
-            stdev: 0.01
+            bias: -0.0001
+            stdev: 0.001
     angular:
         noise:
-            bias: 0.01
-            stdev: 0.05
+            bias: 0.0
+            stdev: 0.01
 scan:
     position:
         x: 0.0
@@ -45,7 +47,7 @@ scan:
         max: 10.0
     num_rays: 360
     noise:
-        bias: 0.04
+        bias: 0.0
         stdev: 0.03
 rgb:
     position:

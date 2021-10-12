@@ -89,6 +89,8 @@ Visualization Manager:
           Value: true
         camera/rgb/optical_frame:
           Value: true
+        map:
+          Value: true
         odom:
           Value: true
         scan:
@@ -100,14 +102,15 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        odom:
-          base_footprint:
-            camera/depth/optical_frame:
-              {}
-            camera/rgb/optical_frame:
-              {}
-            scan:
-              {}
+        map:
+          odom:
+            base_footprint:
+              camera/depth/optical_frame:
+                {}
+              camera/rgb/optical_frame:
+                {}
+              scan:
+                {}
       Update Interval: 0
       Value: true
     - Alpha: 0.800000011920929
@@ -142,11 +145,21 @@ Visualization Manager:
       Transport Hint: raw
       Unreliable: false
       Value: true
+    - Alpha: 0.699999988079071
+      Class: rviz/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic: /habitat_sim/map
+      Unreliable: false
+      Use Timestamp: false
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
     Default Light: true
-    Fixed Frame: odom
+    Fixed Frame: map
     Frame Rate: 30
   Name: root
   Tools:
@@ -170,7 +183,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 7.105374336242676
+      Distance: 18.325368881225586
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -186,9 +199,9 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.6153983473777771
+      Pitch: 0.7453982830047607
       Target Frame: <Fixed Frame>
-      Yaw: 1.6803971529006958
+      Yaw: 5.593575477600098
     Saved: ~
 Window Geometry:
   Depth:

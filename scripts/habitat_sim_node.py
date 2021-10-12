@@ -7,6 +7,7 @@ from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from rosgraph_msgs.msg import Clock
 from geometry_msgs.msg import Twist, TransformStamped
 from sensor_msgs.msg import LaserScan, Image, CameraInfo
+from nav_msgs.msg import OccupancyGrid
 from std_srvs.srv import Empty, EmptyResponse
 
 import numpy as np
@@ -27,25 +28,32 @@ class HabitatSimNode:
         self._init_rgbd()
         self._init_odom()
         self._init_sim()
+        self._init_map()
 
-        rospy.Service("~reset", Empty, self.reset)
+        rospy.Service("~reset", Empty, self._reset_handler)
         self._needs_reset = False
 
-
-    def reset(self, req):
+    def _reset_handler(self, req):
         self._needs_reset = True
-        if self._use_sim_time:
-            self._clock_msg = Clock()
         return EmptyResponse()
 
+    def _reset(self):
+        self._last_obs = self._sim.reset()
+        self._last_state = self._sim.get_agent(0).state
+        self._odom_pos_drift = np.array([0.0, 0.0, 0.0])
+        self._odom_rot_drift = np.quaternion(1.0, 0.0, 0.0, 0.0)
+        if self._use_sim_time:
+            self._clock_msg = Clock()
+        self._needs_reset = False
 
     def loop(self):
-        self._broadcast_static_tf()
+        self._broadcast_static_tfs()
+        self._publish_static_map()
         while not rospy.is_shutdown():
             if self._needs_reset:
-                self._last_obs = self._sim.reset()
-                self._needs_reset = False
-            self._broadcast_tf()
+                self._reset()
+            self._broadcast_odom_tf()
+            self._broadcast_map_tf()
             self._publish_scan()
             self._publish_rgbd()
             self._step_sim()
@@ -202,26 +210,70 @@ class HabitatSimNode:
         tmpl_id = mngr.get_template_ID_by_handle(*mngr.get_template_handles('cylinderSolid'))
         self._agent_obj_id = self._sim.add_object(tmpl_id, self._sim.get_agent(0).scene_node)
 
-        state = habitat_sim.agent.AgentState()
+        self._init_state = habitat_sim.agent.AgentState()
         if rospy.get_param("~agent/start_position/random", True):
-            state.position = self._sim.pathfinder.get_random_navigable_point()
+            self._init_state.position = self._sim.pathfinder.get_random_navigable_point()
         else:
-            state.position[0] = -rospy.get_param("~agent/start_position/y", 0.0)
-            state.position[1] = rospy.get_param("~agent/start_position/z", 0.0)
-            state.position[2] = -rospy.get_param("~agent/start_position/x", 0.0)
+            self._init_state.position[0] = -rospy.get_param("~agent/start_position/y", 0.0)
+            self._init_state.position[1] = rospy.get_param("~agent/start_position/z", 0.0)
+            self._init_state.position[2] = -rospy.get_param("~agent/start_position/x", 0.0)
         if rospy.get_param("~agent/start_orientation/random", True):
             yaw = 2 * np.pi * np.random.random()
         else:
             yaw = np.radians(rospy.get_param("~agent/start_orientation/yaw", 0.0))
-        state.rotation = np.quaternion(np.cos(0.5 * yaw), 0, np.sin(0.5 * yaw), 0)
+        self._init_state.rotation = np.quaternion(np.cos(0.5 * yaw), 0, np.sin(0.5 * yaw), 0)
 
-        self._sim.get_agent(0).set_state(state, is_initial=True)
+        self._sim.get_agent(0).set_state(self._init_state, is_initial=True)
         self._last_obs = self._sim.get_sensor_observations()
+        self._last_state = self._sim.get_agent(0).state
 
         self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
         self._last_cmd_vel_time = rospy.Time.now()
         self._cmd_timeout = rospy.Duration(rospy.get_param("~agent/ctrl/timeout", 1.0))
         self._has_cmd = False
+
+    def _init_map(self):
+        rospy.loginfo("Setting up oracle map")
+        res = rospy.get_param("~map/resolution", 0.02)
+
+        self._map_msg = OccupancyGrid()
+        self._map_msg.header.stamp = rospy.Time.now()
+        self._map_msg.header.frame_id = "map"
+        self._map_msg.info.map_load_time = self._map_msg.header.stamp
+        self._map_msg.info.resolution = res
+
+        agent_height = self._sim.get_agent(0).state.position[1]
+        settings = habitat_sim.nav.NavMeshSettings()
+        settings.set_defaults()
+        settings.agent_radius = 0
+        settings.agent_height = 0
+        self._sim.recompute_navmesh(self._sim.pathfinder, settings)
+        sensor_height = self._sensor_specs[0].position[1]
+        navmask = self._sim.pathfinder.get_topdown_view(res, agent_height + sensor_height)
+        settings.agent_radius = self._sim.config.agents[0].radius
+        settings.agent_height = self._sim.config.agents[0].height
+        self._sim.recompute_navmesh(self._sim.pathfinder, settings)
+
+        edges = np.zeros_like(navmask)
+        edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[:-1, 1:]
+        edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[1:, :-1]
+        edges[:-1, 1:] |= ~navmask[:-1, 1:] & navmask[:-1, :-1]
+        edges[1:, :-1] |= ~navmask[1:, :-1] & navmask[:-1, :-1]
+        lower, upper = self._sim.pathfinder.get_bounds()
+
+        self._map_msg.info.width = navmask.shape[0]
+        self._map_msg.info.height = navmask.shape[1]
+        self._map_msg.info.origin.position.x = -upper[2]
+        self._map_msg.info.origin.position.y = -upper[0]
+        self._map_msg.info.origin.position.z = agent_height
+        self._map_msg.info.origin.orientation.w = 1
+
+        map_data = np.full(navmask.shape, -1, dtype=np.int8)
+        map_data[navmask] = 0
+        map_data[edges] = 100
+        self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
+
+        self._map_pub = rospy.Publisher("~map", OccupancyGrid, queue_size=1, latch=True)
 
     def _on_cmd_vel(self, msg):
         self._vel_ctrl.linear_velocity.z = -msg.linear.x
@@ -229,33 +281,34 @@ class HabitatSimNode:
         self._last_cmd_vel_time = rospy.Time.now()
         self._has_cmd = True
 
-    def _broadcast_static_tf(self):
+    def _broadcast_static_tfs(self):
         static_tf_brdcast = StaticTransformBroadcaster()
         static_tf_brdcast.sendTransform(self._static_tfs)
 
-    def _broadcast_tf(self):
-        state = self._sim.get_agent(0).get_state()
-        init_state = self._sim.get_agent(0).initial_state
+    def _publish_static_map(self):
+        self._map_pub.publish(self._map_msg)
 
-        if self._has_cmd: # Only drift when moving...
-            if self._odom_ang_stdev > 0:
-                drift = self._rng.normal(self._odom_ang_bias, self._odom_ang_stdev)
-                self._odom_rot_drift *= np.quaternion(np.cos(0.5 * drift), 0,
-                                                      np.sin(0.5 * drift), 0)
-                state.rotation *= self._odom_rot_drift
+    def _update_odom(self):
+        if self._odom_lin_stdev > 0:
+            drift = self._rng.normal(self._odom_lin_bias, self._odom_lin_stdev)
+            heading = (self._last_state.rotation
+                       * np.quaternion(0, 0, 0, -1)
+                       * self._last_state.rotation.conj()).vec
+            self._odom_pos_drift += drift * heading
+            self._last_state.position += self._odom_pos_drift
 
-            if self._odom_lin_stdev > 0:
-                drift = self._rng.normal(self._odom_lin_bias, self._odom_lin_stdev)
-                heading = (state.rotation
-                           * np.quaternion(0, 0, 0, -1)
-                           * state.rotation.conj()).vec
-                self._odom_pos_drift += drift * heading
-                state.position += self._odom_pos_drift
+        if self._odom_ang_stdev > 0:
+            drift = self._rng.normal(self._odom_ang_bias, self._odom_ang_stdev)
+            self._odom_rot_drift *= np.quaternion(np.cos(0.5 * drift), 0,
+                                                  np.sin(0.5 * drift), 0)
+            self._last_state.rotation *= self._odom_rot_drift
 
-        rel_pos = (init_state.rotation.conj()
-                   * np.quaternion(0, *(state.position - init_state.position))
-                   * init_state.rotation).vec
-        rel_rot = state.rotation * init_state.rotation.conj()
+    def _broadcast_odom_tf(self):
+        rot_w_drift = self._init_state.rotation * self._odom_rot_drift.conj()
+        rel_pos = (rot_w_drift.conj()
+                   * np.quaternion(0, *(self._last_state.position - self._init_state.position))
+                   * rot_w_drift).vec
+        rel_rot = self._last_state.rotation * self._init_state.rotation.conj()
 
         tf = TransformStamped()
         tf.header.stamp = rospy.Time.now()
@@ -268,6 +321,23 @@ class HabitatSimNode:
         tf.transform.rotation.y = -rel_rot.x
         tf.transform.rotation.z = rel_rot.y
         tf.transform.rotation.w = rel_rot.w
+        self._tf_brdcast.sendTransform(tf)
+
+    def _broadcast_map_tf(self):
+        tf = TransformStamped()
+        tf.header.stamp = rospy.Time.now()
+        tf.header.frame_id = "map"
+        tf.child_frame_id = "odom"
+
+        pos = self._init_state.position - self._odom_pos_drift
+        rot = self._init_state.rotation * self._odom_rot_drift.conj()
+        tf.transform.translation.x = -pos[2]
+        tf.transform.translation.y = -pos[0]
+        tf.transform.translation.z = pos[1]
+        tf.transform.rotation.x = -rot.z
+        tf.transform.rotation.y = -rot.x
+        tf.transform.rotation.z = rot.y
+        tf.transform.rotation.w = rot.w
         self._tf_brdcast.sendTransform(tf)
 
     def _publish_scan(self):
@@ -309,6 +379,8 @@ class HabitatSimNode:
         self._sim.set_translation(nxt_pos, self._agent_obj_id)
         self._sim.set_rotation(nxt_s.rotation, self._agent_obj_id)
         self._last_obs = self._sim.get_sensor_observations()
+        self._last_state = self._sim.get_agent(0).state
+        self._update_odom()
 
 
 if __name__ == "__main__":
