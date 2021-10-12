@@ -19,14 +19,14 @@ agent:
             max_brk: 0.4
             noise:
                 bias: 0.0
-                stdev: 0.0
+                stdev: 0.01
         angular:
             max_vel: 1.5
             max_acc: 0.5
             max_brk: 0.8
             noise:
                 bias: 0.0
-                stdev: 0.0
+                stdev: 0.03
 map:
     enabled: true
     resolution: 0.02

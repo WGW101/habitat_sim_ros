@@ -401,7 +401,10 @@ class HabitatSimNode:
             dv = min(max(dv, -self._lin_max_acc * dt), self._lin_max_acc * dt)
         else:
             dv = min(max(dv, -self._lin_max_brk * dt), self._lin_max_brk * dt)
-        self._vel_ctrl.linear_velocity.z = -v - dv
+
+        if self._ctrl_lin_stdev > 0:
+            v += self._rng.normal(self._ctrl_lin_bias, self._ctrl_lin_stdev)
+        self._vel_ctrl.linear_velocity.z = -(v + dv)
 
         w = self._vel_ctrl.angular_velocity.y
         dw = self._ang_cmd - w
@@ -409,6 +412,9 @@ class HabitatSimNode:
             dw = min(max(dw, -self._ang_max_acc * dt), self._ang_max_acc * dt)
         else:
             dw = min(max(dw, -self._ang_max_brk * dt), self._ang_max_brk * dt)
+
+        if self._ctrl_ang_stdev > 0:
+            w += self._rng.normal(self._ctrl_ang_bias, self._ctrl_ang_stdev)
         self._vel_ctrl.angular_velocity.y = w + dw
 
         s = self._sim.get_rigid_state(self._agent_obj_id)
