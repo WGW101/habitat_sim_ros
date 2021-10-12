@@ -28,6 +28,7 @@ class HabitatSimNode:
         self._init_rgbd()
         self._init_odom()
         self._init_sim()
+        self._init_ctrl()
         self._init_map()
 
         rospy.Service("~reset", Empty, self._reset_handler)
@@ -198,12 +199,6 @@ class HabitatSimNode:
         agent_cfg.radius = rospy.get_param("~agent/radius", 0.2)
         agent_cfg.sensor_specifications = self._sensor_specs
 
-        self._vel_ctrl = habitat_sim.physics.VelocityControl()
-        self._vel_ctrl.controlling_lin_vel = True
-        self._vel_ctrl.lin_vel_is_local = True
-        self._vel_ctrl.controlling_ang_vel = True
-        self._vel_ctrl.ang_vel_is_local = True
-
         cfg = habitat_sim.simulator.Configuration(sim_cfg, [agent_cfg])
         self._sim = habitat_sim.simulator.Simulator(cfg)
         mngr = self._sim.get_object_template_manager()
@@ -227,10 +222,32 @@ class HabitatSimNode:
         self._last_obs = self._sim.get_sensor_observations()
         self._last_state = self._sim.get_agent(0).state
 
-        self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
+    def _init_ctrl(self):
         self._last_cmd_vel_time = rospy.Time.now()
         self._cmd_timeout = rospy.Duration(rospy.get_param("~agent/ctrl/timeout", 1.0))
         self._has_cmd = False
+
+        self._lin_max_vel = rospy.get_param("~agent/ctrl/linear/max_vel", 1.0)
+        rev = rospy.get_param("~agent/ctrl/linear/reverse", True)
+        self._lin_min_vel = -self._lin_max_vel if rev else 0.0
+        self._lin_max_acc = rospy.get_param("~agent/ctrl/linear/max_acc", 0.2)
+        self._lin_max_brk = rospy.get_param("~agent/ctrl/linear/max_brk", 0.4)
+        self._ctrl_lin_bias = rospy.get_param("~agent/ctrl/linear/noise/bias", 0.0)
+        self._ctrl_lin_stdev = rospy.get_param("~agent/ctrl/linear/noise/stdev", 0.0)
+
+        self._ang_max_vel = rospy.get_param("~agent/ctrl/angular/max_vel", 1.5)
+        self._ang_max_acc = rospy.get_param("~agent/ctrl/angular/max_acc", 0.5)
+        self._ang_max_brk = rospy.get_param("~agent/ctrl/angular/max_brk", 0.8)
+        self._ctrl_ang_bias = rospy.get_param("~agent/ctrl/angular/noise/bias", 0.0)
+        self._ctrl_ang_stdev = rospy.get_param("~agent/ctrl/angular/noise/stdev", 0.0)
+
+        self._vel_ctrl = habitat_sim.physics.VelocityControl()
+        self._vel_ctrl.controlling_lin_vel = True
+        self._vel_ctrl.lin_vel_is_local = True
+        self._vel_ctrl.controlling_ang_vel = True
+        self._vel_ctrl.ang_vel_is_local = True
+
+        self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
 
     def _init_map(self):
         self._map_enabled = rospy.get_param("~map/enabled", False)
@@ -278,8 +295,8 @@ class HabitatSimNode:
             self._map_pub = rospy.Publisher("~map", OccupancyGrid, queue_size=1, latch=True)
 
     def _on_cmd_vel(self, msg):
-        self._vel_ctrl.linear_velocity.z = -msg.linear.x
-        self._vel_ctrl.angular_velocity.y = msg.angular.z
+        self._lin_cmd = min(max(msg.linear.x, self._lin_min_vel), self._lin_max_vel)
+        self._ang_cmd = min(max(msg.angular.z, -self._ang_max_vel), self._ang_max_vel)
         self._last_cmd_vel_time = rospy.Time.now()
         self._has_cmd = True
 
@@ -371,13 +388,30 @@ class HabitatSimNode:
 
         now = rospy.Time.now()
         if now - self._last_cmd_vel_time > self._cmd_timeout:
-            rospy.logwarn("Last velocity command timed out, cancelling it.")
+            rospy.logwarn("Last velocity command timed out, forcing agent stop.")
             self._vel_ctrl.linear_velocity.z = 0
             self._vel_ctrl.angular_velocity.y = 0
             self._has_cmd = False
 
-        s = self._sim.get_rigid_state(self._agent_obj_id)
         dt = self._rate.sleep_dur.to_sec()
+
+        v = -self._vel_ctrl.linear_velocity.z
+        dv = self._lin_cmd - v
+        if v * dv > 0:
+            dv = min(max(dv, -self._lin_max_acc * dt), self._lin_max_acc * dt)
+        else:
+            dv = min(max(dv, -self._lin_max_brk * dt), self._lin_max_brk * dt)
+        self._vel_ctrl.linear_velocity.z = -v - dv
+
+        w = self._vel_ctrl.angular_velocity.y
+        dw = self._ang_cmd - w
+        if w * dw > 0:
+            dw = min(max(dw, -self._ang_max_acc * dt), self._ang_max_acc * dt)
+        else:
+            dw = min(max(dw, -self._ang_max_brk * dt), self._ang_max_brk * dt)
+        self._vel_ctrl.angular_velocity.y = w + dw
+
+        s = self._sim.get_rigid_state(self._agent_obj_id)
         nxt_s = self._vel_ctrl.integrate_transform(dt, s)
         nxt_pos = self._sim.step_filter(s.translation, nxt_s.translation)
         self._sim.set_translation(nxt_pos, self._agent_obj_id)
