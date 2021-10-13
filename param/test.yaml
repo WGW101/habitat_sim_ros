@@ -1,7 +1,7 @@
 sim:
     rate: 60.0
     allow_sliding: true
-    scene_path: "/home/wgw/habitat_data/scene_datasets/mp3d/1LXtFkjw3qL/1LXtFkjw3qL.glb"
+    scene_id: "mp3d/1LXtFkjw3qL/1LXtFkjw3qL.glb"
     seed: 1245
 agent:
     height: 0.65

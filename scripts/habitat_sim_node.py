@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 #-*-coding: utf8-*-
+import os
+import errno
+import importlib
+
+import numpy as np
+import quaternion
+import habitat_sim
+
 import rospy
 from cv_bridge import CvBridge
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
@@ -8,11 +16,9 @@ from rosgraph_msgs.msg import Clock
 from geometry_msgs.msg import Twist, TransformStamped
 from sensor_msgs.msg import LaserScan, Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid
-from std_srvs.srv import Empty, EmptyResponse
-
-import numpy as np
-import quaternion
-import habitat_sim
+from habitat_sim_ros.srv import (Reset, ResetResponse,
+                                 LoadScene, LoadSceneResponse,
+                                 RespawnAgent, RespawnAgentResponse)
 
 
 class HabitatSimNode:
@@ -31,27 +37,86 @@ class HabitatSimNode:
         self._init_ctrl()
         self._init_map()
 
-        rospy.Service("~reset", Empty, self._reset_handler)
-        self._needs_reset = False
+        rospy.Service("~load_scene", LoadScene, self._load_scene_handler)
+        self._pending_scene = None
+        rospy.Service("~respawn_agent", RespawnAgent, self._respawn_agent_handler)
+        self._pending_state = None
+        rospy.Service("~reset", Reset, self._reset_handler)
+        self._pending_reset = False
+
+    @staticmethod
+    def _resolve_scene_path(scene_id):
+        if os.path.isfile(scene_id):
+            return scene_id
+
+        habitat_origin = importlib.util.find_spec("habitat").origin
+        path = os.path.join(os.path.dirname(habitat_origin),
+                            "..", "data", "scene_datasets", scene_id)
+        if os.path.isfile(path):
+            return os.path.normpath(path)
+
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), scene_id)
+
+    @staticmethod
+    def _pose_to_state(pose):
+        state = habitat_sim.agent.AgentState()
+        state.position[0] = -pose.position.y
+        state.position[1] = pose.position.z
+        state.position[2] = -pose.position.x
+        state.rotation.y = pose.orientation.z
+        state.rotation.w = pose.orientation.w
+        return state
+
+    def _load_scene_handler(self, req):
+        self._pending_scene = HabitatSimNode._resolve_scene_path(req.scene_id)
+        self._pending_reset = True
+        return LoadSceneResponse()
+
+    def _respawn_agent_handler(self, req):
+        self._pending_state = HabitatSimNode._pose_to_state(req.pose)
+        self._pending_reset = True
+        return RespawnAgentResponse()
 
     def _reset_handler(self, req):
-        self._needs_reset = True
-        return EmptyResponse()
+        self._pending_reset = True
+        return ResetResponse()
+
+    def _load_scene(self): #TODO fixme
+        rospy.loginfo(f"Loading scene '{self._pending_scene}'")
+        self._cfg.sim_cfg.scene_id = self._pending_scene
+        self._sim._config_backend(self._cfg)
+        self._pending_scene = None
+
+    def _respawn_agent(self):
+        snapped_pos = np.array(self._sim.pathfinder.snap_point(self._pending_state.position))
+        rot = self._pending_state.rotation
+        a = np.degrees(2 * np.arctan(rot.y / rot.w)) if rot.w != 0 else 180
+        rospy.loginfo(f"Respawning agent at position {self._pending_state.position!s} "
+                      + f"(snapped to {snapped_pos!s}) with rotation {a}\u00b0")
+        self._pending_state.position = snapped_pos
+        self._sim.get_agent(0).set_state(self._pending_state, is_initial=True)
+        self._pending_state = None
 
     def _reset(self):
+        rospy.loginfo("Resetting habitat sim")
         self._last_obs = self._sim.reset()
         self._last_state = self._sim.get_agent(0).state
         self._odom_pos_drift = np.array([0.0, 0.0, 0.0])
         self._odom_rot_drift = np.quaternion(1.0, 0.0, 0.0, 0.0)
         if self._use_sim_time:
             self._clock_msg = Clock()
-        self._needs_reset = False
+        self._pending_reset = False
 
     def loop(self):
         self._broadcast_static_tfs()
-        self._publish_static_map()
+        self._start_sim()
+        self._publish_map()
         while not rospy.is_shutdown():
-            if self._needs_reset:
+            if self._pending_scene is not None:
+                self._load_scene()
+            if self._pending_state is not None:
+                self._respawn_agent()
+            if self._pending_reset:
                 self._reset()
             self._broadcast_odom_tf()
             self._broadcast_map_tf()
@@ -191,7 +256,8 @@ class HabitatSimNode:
 
         sim_cfg = habitat_sim.sim.SimulatorConfiguration()
         sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding", True)
-        sim_cfg.scene_id = rospy.get_param("~sim/scene_path") # required!
+        scene_id = rospy.get_param("~sim/scene_id") # required!
+        sim_cfg.scene_id = HabitatSimNode._resolve_scene_path(scene_id)
         sim_cfg.random_seed = self._seed
 
         agent_cfg = habitat_sim.agent.AgentConfiguration()
@@ -199,28 +265,7 @@ class HabitatSimNode:
         agent_cfg.radius = rospy.get_param("~agent/radius", 0.2)
         agent_cfg.sensor_specifications = self._sensor_specs
 
-        cfg = habitat_sim.simulator.Configuration(sim_cfg, [agent_cfg])
-        self._sim = habitat_sim.simulator.Simulator(cfg)
-        mngr = self._sim.get_object_template_manager()
-        tmpl_id = mngr.get_template_ID_by_handle(*mngr.get_template_handles('cylinderSolid'))
-        self._agent_obj_id = self._sim.add_object(tmpl_id, self._sim.get_agent(0).scene_node)
-
-        self._init_state = habitat_sim.agent.AgentState()
-        if rospy.get_param("~agent/start_position/random", True):
-            self._init_state.position = self._sim.pathfinder.get_random_navigable_point()
-        else:
-            self._init_state.position[0] = -rospy.get_param("~agent/start_position/y", 0.0)
-            self._init_state.position[1] = rospy.get_param("~agent/start_position/z", 0.0)
-            self._init_state.position[2] = -rospy.get_param("~agent/start_position/x", 0.0)
-        if rospy.get_param("~agent/start_orientation/random", True):
-            yaw = 2 * np.pi * np.random.random()
-        else:
-            yaw = np.radians(rospy.get_param("~agent/start_orientation/yaw", 0.0))
-        self._init_state.rotation = np.quaternion(np.cos(0.5 * yaw), 0, np.sin(0.5 * yaw), 0)
-
-        self._sim.get_agent(0).set_state(self._init_state, is_initial=True)
-        self._last_obs = self._sim.get_sensor_observations()
-        self._last_state = self._sim.get_agent(0).state
+        self._cfg = habitat_sim.simulator.Configuration(sim_cfg, [agent_cfg])
 
     def _init_ctrl(self):
         self._last_cmd_vel_time = rospy.Time.now()
@@ -260,37 +305,7 @@ class HabitatSimNode:
             self._map_msg.header.frame_id = "map"
             self._map_msg.info.map_load_time = self._map_msg.header.stamp
             self._map_msg.info.resolution = res
-
-            agent_height = self._sim.get_agent(0).state.position[1]
-            settings = habitat_sim.nav.NavMeshSettings()
-            settings.set_defaults()
-            settings.agent_radius = 0
-            settings.agent_height = 0
-            self._sim.recompute_navmesh(self._sim.pathfinder, settings)
-            sensor_height = self._sensor_specs[0].position[1]
-            navmask = self._sim.pathfinder.get_topdown_view(res, agent_height + sensor_height)
-            settings.agent_radius = self._sim.config.agents[0].radius
-            settings.agent_height = self._sim.config.agents[0].height
-            self._sim.recompute_navmesh(self._sim.pathfinder, settings)
-
-            edges = np.zeros_like(navmask)
-            edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[:-1, 1:]
-            edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[1:, :-1]
-            edges[:-1, 1:] |= ~navmask[:-1, 1:] & navmask[:-1, :-1]
-            edges[1:, :-1] |= ~navmask[1:, :-1] & navmask[:-1, :-1]
-            lower, upper = self._sim.pathfinder.get_bounds()
-
-            self._map_msg.info.width = navmask.shape[0]
-            self._map_msg.info.height = navmask.shape[1]
-            self._map_msg.info.origin.position.x = -upper[2]
-            self._map_msg.info.origin.position.y = -upper[0]
-            self._map_msg.info.origin.position.z = agent_height
             self._map_msg.info.origin.orientation.w = 1
-
-            map_data = np.full(navmask.shape, -1, dtype=np.int8)
-            map_data[navmask] = 0
-            map_data[edges] = 100
-            self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
 
             self._map_pub = rospy.Publisher("~map", OccupancyGrid, queue_size=1, latch=True)
 
@@ -304,8 +319,71 @@ class HabitatSimNode:
         static_tf_brdcast = StaticTransformBroadcaster()
         static_tf_brdcast.sendTransform(self._static_tfs)
 
-    def _publish_static_map(self):
+    def _start_sim(self):
+        self._sim = habitat_sim.simulator.Simulator(self._cfg)
+        mngr = self._sim.get_object_template_manager()
+        tmpl_id = mngr.get_template_ID_by_handle(*mngr.get_template_handles('cylinderSolid'))
+        self._agent_obj_id = self._sim.add_object(tmpl_id, self._sim.get_agent(0).scene_node)
+
+        self._init_state = habitat_sim.agent.AgentState()
+        if rospy.get_param("~agent/start_position/random", True):
+            self._init_state.position = self._sim.pathfinder.get_random_navigable_point()
+        else:
+            self._init_state.position[0] = -rospy.get_param("~agent/start_position/y", 0.0)
+            self._init_state.position[1] = rospy.get_param("~agent/start_position/z", 0.0)
+            self._init_state.position[2] = -rospy.get_param("~agent/start_position/x", 0.0)
+        if rospy.get_param("~agent/start_orientation/random", True):
+            yaw = 2 * np.pi * np.random.random()
+        else:
+            yaw = np.radians(rospy.get_param("~agent/start_orientation/yaw", 0.0))
+        self._init_state.rotation = np.quaternion(np.cos(0.5 * yaw), 0, np.sin(0.5 * yaw), 0)
+
+        self._sim.get_agent(0).set_state(self._init_state, is_initial=True)
+        self._last_obs = self._sim.get_sensor_observations()
+        self._last_state = self._sim.get_agent(0).state
+
+    def _get_navmask(self, agent_height):
+        settings = habitat_sim.nav.NavMeshSettings()
+        settings.set_defaults()
+        settings.agent_radius = 0
+        settings.agent_height = 0
+        self._sim.recompute_navmesh(self._sim.pathfinder, settings)
+        sensor_height = self._sensor_specs[0].position[1]
+        res = self._map_msg.info.resolution
+        navmask = self._sim.pathfinder.get_topdown_view(res, agent_height + sensor_height)
+        settings.agent_radius = self._cfg.agents[0].radius
+        settings.agent_height = self._cfg.agents[0].height
+        self._sim.recompute_navmesh(self._sim.pathfinder, settings)
+        return navmask
+
+    @staticmethod
+    def _get_edges(navmask):
+        edges = np.zeros_like(navmask)
+        edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[:-1, 1:]
+        edges[:-1, :-1] |= ~navmask[:-1, :-1] & navmask[1:, :-1]
+        edges[:-1, 1:] |= ~navmask[:-1, 1:] & navmask[:-1, :-1]
+        edges[1:, :-1] |= ~navmask[1:, :-1] & navmask[:-1, :-1]
+        return edges
+
+    def _publish_map(self):
         if self._map_enabled:
+            rospy.loginfo("Computing oracle map")
+            agent_height = self._sim.get_agent(0).state.position[1]
+            navmask = self._get_navmask(agent_height)
+            edges = HabitatSimNode._get_edges(navmask)
+            lower, upper = self._sim.pathfinder.get_bounds()
+
+            self._map_msg.info.width = navmask.shape[0]
+            self._map_msg.info.height = navmask.shape[1]
+            self._map_msg.info.origin.position.x = -upper[2]
+            self._map_msg.info.origin.position.y = -upper[0]
+            self._map_msg.info.origin.position.z = agent_height
+
+            map_data = np.full(navmask.shape, -1, dtype=np.int8)
+            map_data[navmask] = 0
+            map_data[edges] = 100
+            self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
+
             self._map_pub.publish(self._map_msg)
 
     def _update_odom(self):
