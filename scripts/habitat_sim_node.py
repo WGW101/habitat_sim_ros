@@ -81,10 +81,15 @@ class HabitatSimNode:
         self._pending_reset = True
         return ResetResponse()
 
-    def _load_scene(self): #TODO fixme
-        rospy.loginfo(f"Loading scene '{self._pending_scene}'")
-        self._cfg.sim_cfg.scene_id = self._pending_scene
-        self._sim._config_backend(self._cfg)
+    def _load_scene(self):
+        if self._pending_scene != self._cfg.sim_cfg.scene_id:
+            rospy.loginfo(f"Loading scene '{self._pending_scene}'")
+            sim_cfg = habitat_sim.sim.SimulatorConfiguration()
+            sim_cfg.allow_sliding = self._cfg.sim_cfg.allow_sliding
+            sim_cfg.scene_id = self._pending_scene
+            sim_cfg.random_seed = self._seed
+            self._cfg = habitat_sim.simulator.Configuration(sim_cfg, self._cfg.agents)
+            self._sim.reconfigure(self._cfg)
         self._pending_scene = None
 
     def _respawn_agent(self):
@@ -110,16 +115,20 @@ class HabitatSimNode:
     def loop(self):
         self._broadcast_static_tfs()
         self._start_sim()
-        self._publish_map()
+        if self._map_enabled:
+            self._publish_map()
         while not rospy.is_shutdown():
             if self._pending_scene is not None:
                 self._load_scene()
+                if self._map_enabled:
+                    self._publish_map()
             if self._pending_state is not None:
                 self._respawn_agent()
             if self._pending_reset:
                 self._reset()
             self._broadcast_odom_tf()
-            self._broadcast_map_tf()
+            if self._map_enabled:
+                self._broadcast_map_tf()
             self._publish_scan()
             self._publish_rgbd()
             self._step_sim()
@@ -270,7 +279,6 @@ class HabitatSimNode:
     def _init_ctrl(self):
         self._last_cmd_vel_time = rospy.Time.now()
         self._cmd_timeout = rospy.Duration(rospy.get_param("~agent/ctrl/timeout", 1.0))
-        self._has_cmd = False
 
         self._lin_max_vel = rospy.get_param("~agent/ctrl/linear/max_vel", 1.0)
         rev = rospy.get_param("~agent/ctrl/linear/reverse", True)
@@ -286,11 +294,11 @@ class HabitatSimNode:
         self._ctrl_ang_bias = rospy.get_param("~agent/ctrl/angular/noise/bias", 0.0)
         self._ctrl_ang_stdev = rospy.get_param("~agent/ctrl/angular/noise/stdev", 0.0)
 
-        self._vel_ctrl = habitat_sim.physics.VelocityControl()
-        self._vel_ctrl.controlling_lin_vel = True
-        self._vel_ctrl.lin_vel_is_local = True
-        self._vel_ctrl.controlling_ang_vel = True
-        self._vel_ctrl.ang_vel_is_local = True
+        self._lin_vel = 0
+        self._ang_vel = 0
+        self._lin_cmd = 0
+        self._ang_cmd = 0
+        self._has_cmd = False
 
         self._cmd_vel_sub = rospy.Subscriber("~cmd_vel", Twist, self._on_cmd_vel)
 
@@ -301,9 +309,7 @@ class HabitatSimNode:
             res = rospy.get_param("~map/resolution", 0.02)
 
             self._map_msg = OccupancyGrid()
-            self._map_msg.header.stamp = rospy.Time.now()
             self._map_msg.header.frame_id = "map"
-            self._map_msg.info.map_load_time = self._map_msg.header.stamp
             self._map_msg.info.resolution = res
             self._map_msg.info.origin.orientation.w = 1
 
@@ -321,9 +327,6 @@ class HabitatSimNode:
 
     def _start_sim(self):
         self._sim = habitat_sim.simulator.Simulator(self._cfg)
-        mngr = self._sim.get_object_template_manager()
-        tmpl_id = mngr.get_template_ID_by_handle(*mngr.get_template_handles('cylinderSolid'))
-        self._agent_obj_id = self._sim.add_object(tmpl_id, self._sim.get_agent(0).scene_node)
 
         self._init_state = habitat_sim.agent.AgentState()
         if rospy.get_param("~agent/start_position/random", True):
@@ -366,25 +369,25 @@ class HabitatSimNode:
         return edges
 
     def _publish_map(self):
-        if self._map_enabled:
-            rospy.loginfo("Computing oracle map")
-            agent_height = self._sim.get_agent(0).state.position[1]
-            navmask = self._get_navmask(agent_height)
-            edges = HabitatSimNode._get_edges(navmask)
-            lower, upper = self._sim.pathfinder.get_bounds()
+        rospy.loginfo("Publishing oracle map")
+        agent_height = self._sim.get_agent(0).state.position[1]
+        navmask = self._get_navmask(agent_height)
+        edges = HabitatSimNode._get_edges(navmask)
+        map_data = np.full(navmask.shape, -1, dtype=np.int8)
+        map_data[navmask] = 0
+        map_data[edges] = 100
+        lower, upper = self._sim.pathfinder.get_bounds()
 
-            self._map_msg.info.width = navmask.shape[0]
-            self._map_msg.info.height = navmask.shape[1]
-            self._map_msg.info.origin.position.x = -upper[2]
-            self._map_msg.info.origin.position.y = -upper[0]
-            self._map_msg.info.origin.position.z = agent_height
+        self._map_msg.header.stamp = rospy.Time.now()
+        self._map_msg.info.map_load_time = self._map_msg.header.stamp
+        self._map_msg.info.width = navmask.shape[0]
+        self._map_msg.info.height = navmask.shape[1]
+        self._map_msg.info.origin.position.x = -upper[2]
+        self._map_msg.info.origin.position.y = -upper[0]
+        self._map_msg.info.origin.position.z = agent_height
+        self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
 
-            map_data = np.full(navmask.shape, -1, dtype=np.int8)
-            map_data[navmask] = 0
-            map_data[edges] = 100
-            self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
-
-            self._map_pub.publish(self._map_msg)
+        self._map_pub.publish(self._map_msg)
 
     def _update_odom(self):
         if self._odom_lin_stdev > 0:
@@ -422,22 +425,21 @@ class HabitatSimNode:
         self._tf_brdcast.sendTransform(tf)
 
     def _broadcast_map_tf(self):
-        if self._map_enabled:
-            tf = TransformStamped()
-            tf.header.stamp = rospy.Time.now()
-            tf.header.frame_id = "map"
-            tf.child_frame_id = "odom"
+        tf = TransformStamped()
+        tf.header.stamp = rospy.Time.now()
+        tf.header.frame_id = "map"
+        tf.child_frame_id = "odom"
 
-            pos = self._init_state.position - self._odom_pos_drift
-            rot = self._init_state.rotation * self._odom_rot_drift.conj()
-            tf.transform.translation.x = -pos[2]
-            tf.transform.translation.y = -pos[0]
-            tf.transform.translation.z = pos[1]
-            tf.transform.rotation.x = -rot.z
-            tf.transform.rotation.y = -rot.x
-            tf.transform.rotation.z = rot.y
-            tf.transform.rotation.w = rot.w
-            self._tf_brdcast.sendTransform(tf)
+        pos = self._init_state.position - self._odom_pos_drift
+        rot = self._init_state.rotation * self._odom_rot_drift.conj()
+        tf.transform.translation.x = -pos[2]
+        tf.transform.translation.y = -pos[0]
+        tf.transform.translation.z = pos[1]
+        tf.transform.rotation.x = -rot.z
+        tf.transform.rotation.y = -rot.x
+        tf.transform.rotation.z = rot.y
+        tf.transform.rotation.w = rot.w
+        self._tf_brdcast.sendTransform(tf)
 
     def _publish_scan(self):
         self._scan_msg.header.stamp = rospy.Time.now()
@@ -467,41 +469,42 @@ class HabitatSimNode:
         now = rospy.Time.now()
         if now - self._last_cmd_vel_time > self._cmd_timeout:
             rospy.logwarn("Last velocity command timed out, forcing agent stop.")
-            self._vel_ctrl.linear_velocity.z = 0
-            self._vel_ctrl.angular_velocity.y = 0
+            self._lin_vel = 0
+            self._ang_vel = 0
             self._has_cmd = False
 
         dt = self._rate.sleep_dur.to_sec()
 
-        v = -self._vel_ctrl.linear_velocity.z
-        dv = self._lin_cmd - v
-        if v * dv > 0:
+        dv = self._lin_cmd - self._lin_vel
+        if self._lin_vel * dv > 0:
             dv = min(max(dv, -self._lin_max_acc * dt), self._lin_max_acc * dt)
         else:
             dv = min(max(dv, -self._lin_max_brk * dt), self._lin_max_brk * dt)
+        self._lin_vel += dv
 
-        if self._ctrl_lin_stdev > 0:
-            v += self._rng.normal(self._ctrl_lin_bias, self._ctrl_lin_stdev)
-        self._vel_ctrl.linear_velocity.z = -(v + dv)
-
-        w = self._vel_ctrl.angular_velocity.y
-        dw = self._ang_cmd - w
-        if w * dw > 0:
+        dw = self._ang_cmd - self._ang_vel
+        if self._ang_vel * dw > 0:
             dw = min(max(dw, -self._ang_max_acc * dt), self._ang_max_acc * dt)
         else:
             dw = min(max(dw, -self._ang_max_brk * dt), self._ang_max_brk * dt)
+        self._ang_vel += dw
 
+        if self._ctrl_lin_stdev > 0:
+            self._lin_vel += self._rng.normal(self._ctrl_lin_bias, self._ctrl_lin_stdev)
         if self._ctrl_ang_stdev > 0:
-            w += self._rng.normal(self._ctrl_ang_bias, self._ctrl_ang_stdev)
-        self._vel_ctrl.angular_velocity.y = w + dw
+            self._ang_vel += self._rng.normal(self._ctrl_ang_bias, self._ctrl_ang_stdev)
 
-        s = self._sim.get_rigid_state(self._agent_obj_id)
-        nxt_s = self._vel_ctrl.integrate_transform(dt, s)
-        nxt_pos = self._sim.step_filter(s.translation, nxt_s.translation)
-        self._sim.set_translation(nxt_pos, self._agent_obj_id)
-        self._sim.set_rotation(nxt_s.rotation, self._agent_obj_id)
+        s = self._sim.get_agent(0).state
+        heading = (s.rotation * np.quaternion(0, 0, 0, -1) * s.rotation.conj()).vec
+        nxt_pos = s.position + self._lin_vel * dt * heading
+        s.position = self._sim.step_filter(s.position, nxt_pos)
+
+        da = self._ang_vel * dt
+        s.rotation *= np.quaternion(np.cos(0.5 * da), 0, np.sin(0.5 * da), 0)
+
+        self._sim.get_agent(0).set_state(s, False)
         self._last_obs = self._sim.get_sensor_observations()
-        self._last_state = self._sim.get_agent(0).state
+        self._last_state = s
         self._update_odom()
 
 
