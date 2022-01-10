@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 #-*-coding: utf8-*-
+
 import os
+import sys
 import errno
 import importlib
 
@@ -49,13 +51,20 @@ class HabitatSimNode:
         if os.path.isfile(scene_id):
             return scene_id
 
+        prefixes = [".", "~"]
         habitat_origin = importlib.util.find_spec("habitat").origin
-        path = os.path.join(os.path.dirname(habitat_origin),
-                            "..", "data", "scene_datasets", scene_id)
-        if os.path.isfile(path):
-            return os.path.normpath(path)
-
-        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), scene_id)
+        if (i := habitat_origin.find("/habitat-lab/")) != -1:
+            # Add prefix where habitat-lab repository is located
+            prefixes.append(habitat_origin[:i+len("/habitat-lab")])
+        if (i := sys.executable.find("/.env/")) != -1:
+            # Add prefix where venv is located
+            prefixes.append(sys.executable[:i])
+        for prefix in prefixes:
+            path = os.path.join(prefix, "data", "scene_datasets", scene_id)
+            if os.path.isfile(path):
+                return os.path.normpath(path)
+        else:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), scene_id)
 
     @staticmethod
     def _pose_to_state(pose):
@@ -169,13 +178,13 @@ class HabitatSimNode:
         n_rays_per_scan = n_rays // 4
         for prefix, pan in zip(("br", "fr", "fl", "bl"),
                                (-0.75 * np.pi, -0.25 * np.pi, 0.25 * np.pi, 0.75 * np.pi)):
-            spec = habitat_sim.sensor.SensorSpec()
+            spec = habitat_sim.sensor.CameraSensorSpec()
             spec.uuid = f"{prefix}_scan"
             spec.sensor_type = habitat_sim.sensor.SensorType.DEPTH
             spec.position = [-y, z, -x]
             spec.orientation = [0.0, pan, 0.0]
             spec.resolution = [1, n_rays_per_scan]
-            spec.parameters["hfov"] = "90"
+            spec.hfov = 90
             self._sensor_specs.append(spec)
         rectif = np.sqrt(np.linspace(-1, 1, n_rays_per_scan)**2 + 1)
         self._scan_rect = np.tile(rectif, (4,))[::-1]
@@ -233,13 +242,13 @@ class HabitatSimNode:
             tf.transform.rotation.w = rot.w
             self._static_tfs.append(tf)
 
-            spec = habitat_sim.sensor.SensorSpec()
+            spec = habitat_sim.sensor.CameraSensorSpec()
             spec.uuid = sensor
             spec.sensor_type = sensor_type
             spec.position = [-y, z, -x]
             spec.orientation = [-tilt, 0, 0]
             spec.resolution = [h, w]
-            spec.parameters["hfov"] = str(hfov)
+            spec.hfov = hfov
             self._sensor_specs.append(spec)
 
         self._rgb_pub = rospy.Publisher("~camera/rgb/image_raw", Image, queue_size=1)

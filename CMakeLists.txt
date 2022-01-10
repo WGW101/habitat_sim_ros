@@ -42,7 +42,6 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
 )
 
-# TODO needs fix, currently overwrites venv python version (for habitat...)
 catkin_install_python(PROGRAMS
   scripts/habitat_sim_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
