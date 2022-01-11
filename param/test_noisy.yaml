@@ -19,26 +19,26 @@ agent:
             max_brk: 0.4
             noise:
                 bias: 0.0
-                stdev: 0.0
+                stdev: 0.01
         angular:
             max_vel: 1.5
             max_acc: 0.5
             max_brk: 0.8
             noise:
                 bias: 0.0
-                stdev: 0.0
+                stdev: 0.03
 map:
     enabled: true
     resolution: 0.02
 odom:
     linear:
         noise:
-            bias: 0.0
-            stdev: 0.0
+            bias: 0.0004
+            stdev: 0.002
     angular:
         noise:
             bias: 0.0
-            stdev: 0.0
+            stdev: 0.005
 scan:
     position:
         x: 0.0
@@ -50,7 +50,7 @@ scan:
     num_rays: 360
     noise:
         bias: 0.0
-        stdev: 0.0
+        stdev: 0.03
 color:
     position:
         x: 0.047
