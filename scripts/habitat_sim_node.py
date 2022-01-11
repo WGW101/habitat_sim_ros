@@ -196,7 +196,7 @@ class HabitatSimNode:
     def _init_rgbd(self):
         rospy.loginfo("Setting up rgbd sensor")
         q = np.quaternion(0.5, -0.5, 0.5, -0.5)
-        for sensor, sensor_type in (("rgb", habitat_sim.sensor.SensorType.COLOR),
+        for sensor, sensor_type in (("color", habitat_sim.sensor.SensorType.COLOR),
                                     ("depth", habitat_sim.sensor.SensorType.DEPTH)):
             x = rospy.get_param(f"~{sensor}/position/x", 0.0)
             y = rospy.get_param(f"~{sensor}/position/y", 0.0)
@@ -251,7 +251,7 @@ class HabitatSimNode:
             spec.hfov = hfov
             self._sensor_specs.append(spec)
 
-        self._rgb_pub = rospy.Publisher("~camera/rgb/image_raw", Image, queue_size=1)
+        self._rgb_pub = rospy.Publisher("~camera/color/image_raw", Image, queue_size=1)
         self._depth_pub = rospy.Publisher("~camera/depth/image_raw", Image, queue_size=1)
         self._cv_bridge = CvBridge()
 

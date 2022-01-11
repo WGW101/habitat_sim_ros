@@ -51,7 +51,7 @@ scan:
     noise:
         bias: 0.0
         stdev: 0.03
-rgb:
+color:
     position:
         x: 0.047
         y: 0.015
