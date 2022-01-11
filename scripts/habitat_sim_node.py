@@ -251,7 +251,7 @@ class HabitatSimNode:
             spec.hfov = hfov
             self._sensor_specs.append(spec)
 
-        self._rgb_pub = rospy.Publisher("~camera/color/image_raw", Image, queue_size=1)
+        self._color_pub = rospy.Publisher("~camera/color/image_raw", Image, queue_size=1)
         self._depth_pub = rospy.Publisher("~camera/depth/image_raw", Image, queue_size=1)
         self._cv_bridge = CvBridge()
 
@@ -463,9 +463,9 @@ class HabitatSimNode:
         self._scan_pub.publish(self._scan_msg)
 
     def _publish_rgbd(self):
-        rgb = self._last_obs["rgb"][:, :, :3]
-        rgb_msg = self._cv_bridge.cv2_to_imgmsg(rgb, encoding="rgb8")
-        self._rgb_pub.publish(rgb_msg)
+        color = self._last_obs["color"][:, :, :3]
+        color_msg = self._cv_bridge.cv2_to_imgmsg(color, encoding="rgb8")
+        self._color_pub.publish(color_msg)
 
         depth = (self._last_obs["depth"] * 1000).astype(np.uint16)
         depth_msg = self._cv_bridge.cv2_to_imgmsg(depth, encoding="mono16")
