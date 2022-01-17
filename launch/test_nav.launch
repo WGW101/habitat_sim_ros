@@ -23,4 +23,5 @@
         <remap from="scan" to="/habitat_sim/scan"/>
         <remap from="cmd_vel" to="/habitat_sim/cmd_vel"/>
     </node>
+    <include file="$(find locobot_bringup)/launch/include/habitat_tf.launch.xml"/>
 </launch>
