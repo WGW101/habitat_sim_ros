@@ -5,6 +5,7 @@ import os
 import sys
 import errno
 import importlib
+import random
 
 import numpy as np
 import quaternion
@@ -27,7 +28,7 @@ class HabitatSimNode:
     def __init__(self):
         rospy.init_node("habitat_sim")
 
-        self._seed = rospy.get_param("~sim/seed", None)
+        self._seed = rospy.get_param("~sim/seed", random.randint(1000, 9999))
         self._rng = np.random.default_rng(self._seed)
 
         self._sensor_specs = []
@@ -262,6 +263,27 @@ class HabitatSimNode:
         self._odom_ang_stdev = rospy.get_param("~odom/angular/noise/stdev", 0.0)
         self._odom_pos_drift = np.array([0.0, 0.0, 0.0])
         self._odom_rot_drift = np.quaternion(1.0, 0.0, 0.0, 0.0)
+
+        tf = TransformStamped()
+        tf.header.stamp = rospy.Time.now()
+        tf.header.frame_id = "map"
+        tf.child_frame_id = "habitat_map"
+        tf.transform.rotation.x = 0.5
+        tf.transform.rotation.y = -0.5
+        tf.transform.rotation.z = -0.5
+        tf.transform.rotation.w = 0.5
+        self._static_tfs.append(tf)
+
+        tf = TransformStamped()
+        tf.header.stamp = rospy.Time.now()
+        tf.header.frame_id = "base_footprint"
+        tf.child_frame_id = "habitat_base_footprint"
+        tf.transform.rotation.x = 0.5
+        tf.transform.rotation.y = -0.5
+        tf.transform.rotation.z = -0.5
+        tf.transform.rotation.w = 0.5
+        self._static_tfs.append(tf)
+
         self._tf_brdcast = TransformBroadcaster()
 
     def _init_sim(self):
