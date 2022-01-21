@@ -52,7 +52,7 @@ class HabitatSimNode:
         if os.path.isfile(scene_id):
             return scene_id
 
-        prefixes = [".", "~"]
+        prefixes = [".", os.environ["HOME"]]
         habitat_origin = importlib.util.find_spec("habitat").origin
         if (i := habitat_origin.find("/habitat-lab/")) != -1:
             # Add prefix where habitat-lab repository is located
@@ -61,6 +61,9 @@ class HabitatSimNode:
             # Add prefix where venv is located
             prefixes.append(sys.executable[:i])
         for prefix in prefixes:
+            path = os.path.join(prefix, scene_id)
+            if os.path.isfile(path):
+                return os.path.normpath(path)
             path = os.path.join(prefix, "data", "scene_datasets", scene_id)
             if os.path.isfile(path):
                 return os.path.normpath(path)
