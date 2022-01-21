@@ -103,6 +103,7 @@ class HabitatSimNode:
             sim_cfg.random_seed = self._seed
             self._cfg = habitat_sim.simulator.Configuration(sim_cfg, self._cfg.agents)
             self._sim.reconfigure(self._cfg)
+        self._init_state = self._sim.get_agent(0).state
         self._pending_scene = None
 
     def _respawn_agent(self):
@@ -112,6 +113,7 @@ class HabitatSimNode:
         rospy.loginfo(f"Respawning agent at position {self._pending_state.position!s} "
                       + f"(snapped to {snapped_pos!s}) with rotation {a}\u00b0")
         self._pending_state.position = snapped_pos
+        self._init_state = self._pending_state
         self._sim.get_agent(0).set_state(self._pending_state, is_initial=True)
         self._pending_state = None
 
@@ -299,7 +301,8 @@ class HabitatSimNode:
 
         sim_cfg = habitat_sim.sim.SimulatorConfiguration()
         sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding", True)
-        scene_id = rospy.get_param("~sim/scene_id") # required!
+        scene_id = rospy.get_param("~sim/scene_id",
+                                   "habitat-test-scenes/skokloster-castle.glb")
         sim_cfg.scene_id = HabitatSimNode._resolve_scene_path(scene_id)
         sim_cfg.random_seed = self._seed
 

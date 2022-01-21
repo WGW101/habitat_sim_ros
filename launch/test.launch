@@ -3,7 +3,8 @@
     <arg name="enable_map" default="true"/>
     <remap from="/habitat_sim/map" to="/map" if="$(arg enable_map)"/>
     <remap from="/cmd_vel" to="/habitat_sim/cmd_vel"/>
-    <node pkg="habitat_sim_ros" type="habitat_sim_node.py" name="habitat_sim" required="true">
+    <node pkg="habitat_sim_ros" type="habitat_sim_node.py" name="habitat_sim"
+          required="true" output="screen">
         <rosparam command="load" file="$(find habitat_sim_ros)/param/test.yaml" />
         <param name="map/enabled" value="$(arg enable_map)"/>
     </node>
