@@ -15,9 +15,9 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_service_files(
   FILES
-  Reset.srv
   LoadScene.srv
   RespawnAgent.srv
+  SpawnObject.srv
 )
 
 generate_messages(
@@ -34,6 +34,7 @@ catkin_package(
   rosgraph_msgs
   rospy
   sensor_msgs
+  std_srvs
   tf2
   tf2_ros
 )

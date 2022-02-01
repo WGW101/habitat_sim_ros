@@ -10,6 +10,7 @@ import random
 import numpy as np
 import quaternion
 import habitat_sim
+import magnum as mn
 
 import rospy
 from cv_bridge import CvBridge
@@ -19,9 +20,10 @@ from rosgraph_msgs.msg import Clock
 from geometry_msgs.msg import Twist, TransformStamped
 from sensor_msgs.msg import LaserScan, Image, CameraInfo
 from nav_msgs.msg import OccupancyGrid
-from habitat_sim_ros.srv import (Reset, ResetResponse,
-                                 LoadScene, LoadSceneResponse,
-                                 RespawnAgent, RespawnAgentResponse)
+from std_srvs.srv import Empty, EmptyResponse
+from habitat_sim_ros.srv import (LoadScene, LoadSceneResponse,
+                                 RespawnAgent, RespawnAgentResponse,
+                                 SpawnObject, SpawnObjectResponse)
 
 
 class HabitatSimNode:
@@ -31,6 +33,7 @@ class HabitatSimNode:
         self._seed = rospy.get_param("~sim/seed", random.randint(1000, 9999))
         self._rng = np.random.default_rng(self._seed)
 
+        self._path_prefixes = {}
         self._sensor_specs = []
         self._static_tfs = []
         self._init_scan()
@@ -44,13 +47,22 @@ class HabitatSimNode:
         self._pending_scene = None
         rospy.Service("~respawn_agent", RespawnAgent, self._respawn_agent_handler)
         self._pending_state = None
-        rospy.Service("~reset", Reset, self._reset_handler)
+        rospy.Service("~spawn_object", SpawnObject, self._spawn_object_handler)
+        self._pending_objects = []
+        rospy.Service("~clear_objects", Empty, self._clear_objects_handler)
+        self._pending_clear_obj = False
+        rospy.Service("~reset", Empty, self._reset_handler)
         self._pending_reset = False
 
-    @staticmethod
-    def _resolve_scene_path(scene_id):
-        if os.path.isfile(scene_id):
+
+    def _resolve_path(self, scene_or_tmpl_id, subdir):
+        if os.path.isfile(scene_or_tmpl_id):
             return scene_id
+
+        if subdir in self._path_prefixes:
+            path = os.path.join(self._path_prefixes[subdir], scene_or_tmpl_id)
+            if os.path.isfile(path):
+                return os.path.normpath(path)
 
         prefixes = [".", os.environ["HOME"]]
         habitat_origin = importlib.util.find_spec("habitat").origin
@@ -60,12 +72,12 @@ class HabitatSimNode:
         if (i := sys.executable.find("/.env/")) != -1:
             # Add prefix where venv is located
             prefixes.append(sys.executable[:i])
+        # Add all prefixes with scene datasets subdir
+        prefixes += [os.path.join(prefix, "data", subdir) for prefix in prefixes]
         for prefix in prefixes:
-            path = os.path.join(prefix, scene_id)
+            path = os.path.join(prefix, scene_or_tmpl_id)
             if os.path.isfile(path):
-                return os.path.normpath(path)
-            path = os.path.join(prefix, "data", "scene_datasets", scene_id)
-            if os.path.isfile(path):
+                self._path_prefixes[subdir] = prefix
                 return os.path.normpath(path)
         else:
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), scene_id)
@@ -80,8 +92,15 @@ class HabitatSimNode:
         state.rotation.w = pose.orientation.w
         return state
 
+    @staticmethod
+    def _pose_to_magnum(pose):
+        p = mn.Vector3(-pose.position.y, pose.position.z, pose.position.x)
+        q = mn.Quaternion((pose.orientation.x, pose.orientation.y, pose.orientation.z),
+                          pose.orientation.w)
+        return p, q
+
     def _load_scene_handler(self, req):
-        self._pending_scene = HabitatSimNode._resolve_scene_path(req.scene_id)
+        self._pending_scene = self._resolve_path(req.scene_id, "scene_datasets")
         self._pending_reset = True
         return LoadSceneResponse()
 
@@ -90,9 +109,20 @@ class HabitatSimNode:
         self._pending_reset = True
         return RespawnAgentResponse()
 
+    def _spawn_object_handler(self, req):
+        tmpl_path = self._resolve_path(req.tmpl_id, "object_datasets")
+        p, q = HabitatSimNode._pose_to_magnum(req.pose)
+        self._pending_objects.append((tmpl_path, p, q))
+        return SpawnObjectResponse()
+
+    def _clear_objects_handler(self, req):
+        self._pending_clear_obj = True
+        self._pending_objects = []
+        return EmptyResponse()
+
     def _reset_handler(self, req):
         self._pending_reset = True
-        return ResetResponse()
+        return EmptyResponse()
 
     def _load_scene(self):
         if self._pending_scene != self._cfg.sim_cfg.scene_id:
@@ -110,12 +140,25 @@ class HabitatSimNode:
         snapped_pos = np.array(self._sim.pathfinder.snap_point(self._pending_state.position))
         rot = self._pending_state.rotation
         a = np.degrees(2 * np.arctan(rot.y / rot.w)) if rot.w != 0 else 180
-        rospy.loginfo(f"Respawning agent at position {self._pending_state.position!s} "
-                      + f"(snapped to {snapped_pos!s}) with rotation {a}\u00b0")
+        rospy.loginfo(f"Respawning agent at {snapped_pos!s} rotated {a}\u00b0")
         self._pending_state.position = snapped_pos
         self._init_state = self._pending_state
         self._sim.get_agent(0).set_state(self._pending_state, is_initial=True)
         self._pending_state = None
+
+    def _spawn_objects(self):
+        while self._pending_objects:
+            tmpl_path, p, q = self._pending_objects.pop()
+            rospy.loginfo(f"Spawning object {tmpl_path} at {p!s} rotated {q!s}")
+            self._sim.get_object_template_manager().load_configs(tmpl_path)
+            obj = self._sim.get_rigid_object_manager().add_object_by_template_handle(tmpl_path)
+            bb = obj.root_scene_node.cumulative_bb
+            obj.translation = p
+            obj.rotation = q
+            obj.motion_type = habitat_sim.physics.MotionType.STATIC
+
+    def _clear_objects(self):
+        self._sim.get_rigid_object_manager().remove_all_objects()
 
     def _reset(self):
         rospy.loginfo("Resetting habitat sim")
@@ -141,6 +184,10 @@ class HabitatSimNode:
                 self._respawn_agent()
             if self._pending_reset:
                 self._reset()
+            if self._pending_clear_obj:
+                self._clear_objects()
+            if self._pending_objects:
+                self._spawn_objects()
             self._broadcast_odom_tf()
             if self._map_enabled:
                 self._broadcast_map_tf()
@@ -303,7 +350,7 @@ class HabitatSimNode:
         sim_cfg.allow_sliding = rospy.get_param("~sim/allow_sliding", True)
         scene_id = rospy.get_param("~sim/scene_id",
                                    "habitat-test-scenes/skokloster-castle.glb")
-        sim_cfg.scene_id = HabitatSimNode._resolve_scene_path(scene_id)
+        sim_cfg.scene_id = self._resolve_path(scene_id, "scene_datasets")
         sim_cfg.random_seed = self._seed
 
         agent_cfg = habitat_sim.agent.AgentConfiguration()
