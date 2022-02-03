@@ -1,0 +1,4 @@
+geometry_msgs/Point source
+geometry_msgs/Point destination
+---
+float64 distance

@@ -18,6 +18,7 @@ add_service_files(
   LoadScene.srv
   RespawnAgent.srv
   SpawnObject.srv
+  GeodesicDistance.srv
 )
 
 generate_messages(

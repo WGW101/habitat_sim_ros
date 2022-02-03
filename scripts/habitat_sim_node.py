@@ -23,7 +23,8 @@ from nav_msgs.msg import OccupancyGrid
 from std_srvs.srv import Empty, EmptyResponse
 from habitat_sim_ros.srv import (LoadScene, LoadSceneResponse,
                                  RespawnAgent, RespawnAgentResponse,
-                                 SpawnObject, SpawnObjectResponse)
+                                 SpawnObject, SpawnObjectResponse,
+                                 GeodesicDistance, GeodesicDistanceResponse)
 
 
 class HabitatSimNode:
@@ -53,7 +54,7 @@ class HabitatSimNode:
         self._pending_clear_obj = False
         rospy.Service("~reset", Empty, self._reset_handler)
         self._pending_reset = False
-
+        rospy.Service("~geodesic_distance", GeodesicDistance, self._geodesic_distance_handler)
 
     def _resolve_path(self, scene_or_tmpl_id, subdir):
         if os.path.isfile(scene_or_tmpl_id):
@@ -88,14 +89,16 @@ class HabitatSimNode:
         state.position[0] = -pose.position.y
         state.position[1] = pose.position.z
         state.position[2] = -pose.position.x
+        state.rotation.x = -pose.orientation.y
         state.rotation.y = pose.orientation.z
+        state.rotation.z = -pose.orientation.x
         state.rotation.w = pose.orientation.w
         return state
 
     @staticmethod
     def _pose_to_magnum(pose):
-        p = mn.Vector3(-pose.position.y, pose.position.z, pose.position.x)
-        q = mn.Quaternion((pose.orientation.x, pose.orientation.y, pose.orientation.z),
+        p = mn.Vector3(-pose.position.y, pose.position.z, -pose.position.x)
+        q = mn.Quaternion((-pose.orientation.y, pose.orientation.z, -pose.orientation.x),
                           pose.orientation.w)
         return p, q
 
@@ -123,6 +126,15 @@ class HabitatSimNode:
     def _reset_handler(self, req):
         self._pending_reset = True
         return EmptyResponse()
+
+    def _geodesic_distance_handler(self, req):
+        path = habitat_sim.nav.MultiGoalShortestPath()
+        path.requested_start = np.array([-req.source.y, req.source.z, -req.source.x])
+        path.requested_ends = [
+            np.array([-req.destination.y, req.destination.z, -req.destination.x]),
+        ]
+        self._sim.pathfinder.find_path(path)
+        return GeodesicDistanceResponse(distance=path.geodesic_distance)
 
     def _load_scene(self):
         if self._pending_scene != self._cfg.sim_cfg.scene_id:
@@ -174,6 +186,8 @@ class HabitatSimNode:
         self._odom_rot_drift = np.quaternion(1.0, 0.0, 0.0, 0.0)
         if self._use_sim_time:
             self._clock_msg = Clock()
+        if self._map_enabled:
+            self._publish_map()
         self._pending_reset = False
 
     def loop(self):
@@ -184,8 +198,6 @@ class HabitatSimNode:
         while not rospy.is_shutdown():
             if self._pending_scene is not None:
                 self._load_scene()
-                if self._map_enabled:
-                    self._publish_map()
             if self._pending_state is not None:
                 self._respawn_agent()
             if self._pending_reset:
