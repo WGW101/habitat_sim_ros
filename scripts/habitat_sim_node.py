@@ -488,6 +488,7 @@ class HabitatSimNode:
         self._map_msg.info.origin.position.x = -upper[2]
         self._map_msg.info.origin.position.y = -upper[0]
         self._map_msg.info.origin.position.z = agent_height
+        self._map_msg.info.origin.orientation.w = 1.0
         self._map_msg.data = map_data[::-1, ::-1].T.flatten().tolist()
 
         self._map_pub.publish(self._map_msg)
