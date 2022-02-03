@@ -153,7 +153,13 @@ class HabitatSimNode:
             self._sim.get_object_template_manager().load_configs(tmpl_path)
             obj = self._sim.get_rigid_object_manager().add_object_by_template_handle(tmpl_path)
             bb = obj.root_scene_node.cumulative_bb
-            obj.translation = p
+            corners = [bb.back_bottom_left, bb.back_bottom_right,
+                       bb.back_top_left, bb.back_top_right,
+                       bb.front_bottom_left, bb.front_bottom_right,
+                       bb.front_top_left, bb.front_top_right]
+            corners = [q.transform_vector(pt) for pt in corners]
+            min_y = min(pt.y for pt in corners)
+            obj.translation = p - mn.Vector3(0, min_y, 0)
             obj.rotation = q
             obj.motion_type = habitat_sim.physics.MotionType.STATIC
 
@@ -191,6 +197,8 @@ class HabitatSimNode:
             self._broadcast_odom_tf()
             if self._map_enabled:
                 self._broadcast_map_tf()
+            else:
+                self._broadcast_ref_tf()
             self._publish_scan()
             self._publish_rgbd()
             self._step_sim()
@@ -318,16 +326,6 @@ class HabitatSimNode:
 
         tf = TransformStamped()
         tf.header.stamp = rospy.Time.now()
-        tf.header.frame_id = "map"
-        tf.child_frame_id = "habitat_map"
-        tf.transform.rotation.x = 0.5
-        tf.transform.rotation.y = -0.5
-        tf.transform.rotation.z = -0.5
-        tf.transform.rotation.w = 0.5
-        self._static_tfs.append(tf)
-
-        tf = TransformStamped()
-        tf.header.stamp = rospy.Time.now()
         tf.header.frame_id = "base_footprint"
         tf.child_frame_id = "habitat_base_footprint"
         tf.transform.rotation.x = 0.5
@@ -396,6 +394,15 @@ class HabitatSimNode:
             self._map_msg.header.frame_id = "map"
             self._map_msg.info.resolution = res
             self._map_msg.info.origin.orientation.w = 1
+
+            tf = TransformStamped()
+            tf.header.frame_id = "habitat_map"
+            tf.child_frame_id = "map"
+            tf.transform.rotation.x = -0.5
+            tf.transform.rotation.y = 0.5
+            tf.transform.rotation.z = 0.5
+            tf.transform.rotation.w = 0.5
+            self._static_tfs.append(tf)
 
             self._map_pub = rospy.Publisher("~map", OccupancyGrid, queue_size=1, latch=True)
 
@@ -508,13 +515,29 @@ class HabitatSimNode:
         tf.transform.rotation.w = rel_rot.w
         self._tf_brdcast.sendTransform(tf)
 
+    def _broadcast_ref_tf(self):
+        tf = TransformStamped()
+        tf.header.stamp = rospy.Time.now()
+        tf.header.frame_id = "habitat_map"
+        tf.child_frame_id = "map"
+
+        tf.transform.translation.x = self._init_state.position[0]
+        tf.transform.translation.y = self._init_state.position[1]
+        tf.transform.translation.z = self._init_state.position[2]
+        q = self._init_state.rotation * np.quaternion(-0.5, 0.5, 0.5, 0.5)
+        tf.transform.rotation.x = q.x
+        tf.transform.rotation.y = q.y
+        tf.transform.rotation.z = q.z
+        tf.transform.rotation.w = q.w
+        self._tf_brdcast.sendTransform(tf)
+
     def _broadcast_map_tf(self):
         tf = TransformStamped()
         tf.header.stamp = rospy.Time.now()
         tf.header.frame_id = "map"
         tf.child_frame_id = "odom"
 
-        pos = self._init_state.position - self._odom_pos_drift
+        pos = self._init_state.position -self._odom_pos_drift
         rot = self._init_state.rotation * self._odom_rot_drift.conj()
         tf.transform.translation.x = -pos[2]
         tf.transform.translation.y = -pos[0]
