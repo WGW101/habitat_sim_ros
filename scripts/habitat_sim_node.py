@@ -186,6 +186,7 @@ class HabitatSimNode:
         self._odom_rot_drift = np.quaternion(1.0, 0.0, 0.0, 0.0)
         if self._use_sim_time:
             self._clock_msg = Clock()
+
         if self._map_enabled:
             self._publish_map()
         self._pending_reset = False
@@ -537,7 +538,7 @@ class HabitatSimNode:
         tf.transform.translation.x = self._init_state.position[0]
         tf.transform.translation.y = self._init_state.position[1]
         tf.transform.translation.z = self._init_state.position[2]
-        q = self._init_state.rotation * np.quaternion(-0.5, 0.5, 0.5, 0.5)
+        q = self._init_state.rotation * np.quaternion(0.5, -0.5, 0.5, 0.5)
         tf.transform.rotation.x = q.x
         tf.transform.rotation.y = q.y
         tf.transform.rotation.z = q.z
